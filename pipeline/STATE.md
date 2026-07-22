@@ -6,7 +6,7 @@
 
 | req_id | title | current_phase | status | last_artifact | next_action |
 |---|---|---|---|---|---|
-| _(none yet)_ | | | | | |
+| REQ-2026-001 | INDEX/prompts sync check | 1-prompt | ready | 00-request.md | run Stage 1 Prompt Smith → 01-prompt.md |
 
 <!-- Example of a live row:
 | REQ-2026-014 | avatar upload | 4-design | awaiting-gate | 04-design.md | human: approve design |
