@@ -11,13 +11,15 @@
     "clarification_request": { "$ref": "#/$defs/clarificationRequest" },
     "architecture_spec": { "$ref": "#/$defs/architectureSpec" },
     "implementation_manifest": { "$ref": "#/$defs/implementationManifest" },
-    "test_manifest": { "$ref": "#/$defs/testManifest" }
+    "test_manifest": { "$ref": "#/$defs/testManifest" },
+    "review_report": { "$ref": "#/$defs/reviewReport" }
   },
   "oneOf": [
     { "required": ["clarification_request"] },
     { "required": ["architecture_spec"] },
     { "required": ["implementation_manifest"] },
-    { "required": ["test_manifest"] }
+    { "required": ["test_manifest"] },
+    { "required": ["review_report"] }
   ],
   "$defs": {
     "stageName": {
@@ -55,6 +57,11 @@
         "coverage_status": {},
         "edge_case_coverage": {},
         "non_vacuous": {},
+        "conformance_check": {},
+        "handoff_consistency": {},
+        "finding_completeness": {},
+        "verdict_rule": {},
+        "merge_guard": {},
         "persistence_check": {},
         "schema_validation": {}
       }
@@ -451,6 +458,139 @@
           }
         },
         "persistence": { "$ref": "#/$defs/prPersistence" },
+        "self_verification": { "$ref": "#/$defs/selfVerification" }
+      }
+    },
+    "reviewReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "feature_id",
+        "module_id",
+        "verdict",
+        "reviewed",
+        "dimensions",
+        "findings",
+        "conformance",
+        "decision",
+        "persistence",
+        "self_verification"
+      ],
+      "properties": {
+        "status": { "const": "COMPLETE" },
+        "feature_id": { "$ref": "#/$defs/idString" },
+        "module_id": { "$ref": "#/$defs/idString" },
+        "verdict": { "type": "string", "enum": ["APPROVE", "APPROVE_WITH_NITS", "REQUEST_CHANGES"] },
+        "reviewed": {
+          "type": "object",
+          "required": ["pr_url"],
+          "properties": {
+            "pr_url": { "type": "string" },
+            "impl_commit_sha": { "type": "string" },
+            "test_commit_sha": { "type": "string" }
+          }
+        },
+        "dimensions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name", "result"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "enum": ["contract_conformance", "correctness", "security", "performance", "test_adequacy", "maintainability"]
+              },
+              "result": { "type": "string", "enum": ["pass", "findings"] },
+              "summary": { "type": "string" }
+            }
+          }
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "severity", "dimension", "file", "line", "detail"],
+            "properties": {
+              "id": { "$ref": "#/$defs/idString" },
+              "severity": { "type": "string", "enum": ["BLOCKER", "MAJOR", "MINOR", "NIT"] },
+              "dimension": {
+                "type": "string",
+                "enum": ["contract_conformance", "correctness", "security", "performance", "test_adequacy", "maintainability"]
+              },
+              "file": { "type": "string" },
+              "line": {},
+              "requirement_ids": { "$ref": "#/$defs/idArray" },
+              "detail": { "type": "string", "minLength": 1 },
+              "suggested_change": { "type": "string" },
+              "route_to": {
+                "anyOf": [
+                  { "$ref": "#/$defs/stageName" },
+                  { "type": "null" }
+                ]
+              }
+            }
+          }
+        },
+        "conformance": {
+          "type": "object",
+          "required": ["interface_signatures_frozen", "scope_respected", "requirement_coverage", "versions_pinned"],
+          "properties": {
+            "interface_signatures_frozen": {
+              "type": "object",
+              "required": ["ok"],
+              "properties": {
+                "ok": { "type": "boolean" },
+                "violations": { "type": "array", "items": { "type": "string" } }
+              }
+            },
+            "scope_respected": {
+              "type": "object",
+              "required": ["ok"],
+              "properties": {
+                "ok": { "type": "boolean" },
+                "out_of_scope_touched": { "type": "array", "items": { "type": "string" } }
+              }
+            },
+            "requirement_coverage": {
+              "type": "object",
+              "properties": {
+                "covered": { "$ref": "#/$defs/idArray" },
+                "uncovered": { "$ref": "#/$defs/idArray" }
+              }
+            },
+            "versions_pinned": {
+              "type": "object",
+              "required": ["ok"],
+              "properties": {
+                "ok": { "type": "boolean" },
+                "violations": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "decision": {
+          "type": "object",
+          "required": ["rationale"],
+          "properties": {
+            "rationale": { "type": "string" },
+            "routed_to": { "type": "array", "items": { "$ref": "#/$defs/stageName" } },
+            "blocking_finding_ids": { "$ref": "#/$defs/idArray" }
+          }
+        },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pr_url", "review_state", "merged"],
+          "properties": {
+            "pr_url": { "type": "string" },
+            "review_id": { "type": ["string", "integer"] },
+            "review_state": { "type": "string", "enum": ["APPROVED", "CHANGES_REQUESTED", "COMMENTED"] },
+            "merged": { "type": "boolean" },
+            "merge_commit_sha": { "type": ["string", "null"] }
+          }
+        },
         "self_verification": { "$ref": "#/$defs/selfVerification" }
       }
     }
