@@ -1,0 +1,458 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/deigedvalo-netizen/claudeskills/main/pipeline/handoff.schema.json",
+  "title": "SDLC Pipeline Handoff",
+  "description": "Machine-to-machine handoff contract for the autonomous SDLC pipeline. Every bot stage emits a single document validating against this schema: either a BLOCKED clarification_request, or the COMPLETE manifest for its stage. Downstream bots MUST reject any document that does not validate.",
+  "type": "object",
+  "minProperties": 1,
+  "maxProperties": 1,
+  "additionalProperties": false,
+  "properties": {
+    "clarification_request": { "$ref": "#/$defs/clarificationRequest" },
+    "architecture_spec": { "$ref": "#/$defs/architectureSpec" },
+    "implementation_manifest": { "$ref": "#/$defs/implementationManifest" },
+    "test_manifest": { "$ref": "#/$defs/testManifest" }
+  },
+  "oneOf": [
+    { "required": ["clarification_request"] },
+    { "required": ["architecture_spec"] },
+    { "required": ["implementation_manifest"] },
+    { "required": ["test_manifest"] }
+  ],
+  "$defs": {
+    "stageName": {
+      "type": "string",
+      "enum": [
+        "requirements-planner-bot",
+        "architect-bot",
+        "implementation-bot",
+        "test-bot",
+        "review-bot"
+      ]
+    },
+    "idString": { "type": "string", "minLength": 1 },
+    "idArray": { "type": "array", "items": { "$ref": "#/$defs/idString" } },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Exact pinned version. No 'latest', no ranges."
+    },
+    "selfVerification": {
+      "type": "object",
+      "description": "Per-stage self-check. schema_valid is mandatory for every stage; other keys are stage-specific check results.",
+      "required": ["schema_valid"],
+      "properties": {
+        "schema_valid": { "type": "boolean" },
+        "requirement_coverage": {},
+        "unsatisfiable": { "type": "array" },
+        "unsatisfiable_requirements": { "type": "array" },
+        "untestable": { "type": "array" },
+        "scope_check": {},
+        "version_check": {},
+        "interface_conformance": {},
+        "build_status": {},
+        "suite_status": {},
+        "coverage_status": {},
+        "edge_case_coverage": {},
+        "non_vacuous": {},
+        "persistence_check": {},
+        "schema_validation": {}
+      }
+    },
+    "clarificationRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "from", "feature_id", "route_to", "blocking_items"],
+      "properties": {
+        "status": { "const": "BLOCKED" },
+        "from": { "$ref": "#/$defs/stageName" },
+        "to": { "$ref": "#/$defs/stageName" },
+        "route_to": { "$ref": "#/$defs/stageName" },
+        "feature_id": { "$ref": "#/$defs/idString" },
+        "module_id": { "$ref": "#/$defs/idString" },
+        "blocking_items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "kind", "detail", "why_blocking"],
+            "properties": {
+              "id": { "$ref": "#/$defs/idString" },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "MISSING_INFO",
+                  "SPEC_DEFECT",
+                  "IMPLEMENTATION_DEFECT",
+                  "FROZEN_SIGNATURE_UNIMPLEMENTABLE",
+                  "UNTESTABLE_CRITERION",
+                  "MISSING_DEPENDENCY",
+                  "CONNECTION",
+                  "WRITE_CONFLICT"
+                ]
+              },
+              "requirement_ids": { "$ref": "#/$defs/idArray" },
+              "acceptance_criteria_ids": { "$ref": "#/$defs/idArray" },
+              "offending_ref": { "type": "string" },
+              "failing_test": { "type": ["string", "null"] },
+              "question": { "type": "string" },
+              "options_considered": { "type": "array" },
+              "detail": { "type": "string", "minLength": 1 },
+              "why_blocking": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "tradeoffs": {
+      "type": "object",
+      "properties": {
+        "scale": {},
+        "latency": {},
+        "cost": {},
+        "team_size": {},
+        "existing_stack": {},
+        "compliance": {}
+      }
+    },
+    "adr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "status", "decision"],
+      "properties": {
+        "id": { "$ref": "#/$defs/idString" },
+        "title": { "type": "string" },
+        "status": { "type": "string", "enum": ["PROPOSED", "ACCEPTED", "SUPERSEDED", "DEPRECATED"] },
+        "context": { "type": "string" },
+        "decision": { "type": "string" },
+        "consequences": { "type": "string" },
+        "requirement_ids": { "$ref": "#/$defs/idArray" }
+      }
+    },
+    "architectureSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "problem_restatement",
+        "options_considered",
+        "recommendation",
+        "components",
+        "interfaces",
+        "technology_choices",
+        "adrs",
+        "downstream_contract",
+        "self_verification"
+      ],
+      "properties": {
+        "status": { "const": "COMPLETE" },
+        "feature_id": { "$ref": "#/$defs/idString" },
+        "problem_restatement": { "type": "string", "minLength": 1 },
+        "reused_adrs": { "$ref": "#/$defs/idArray" },
+        "assumptions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "statement"],
+            "properties": {
+              "id": { "$ref": "#/$defs/idString" },
+              "statement": { "type": "string" },
+              "requirement_ids": { "$ref": "#/$defs/idArray" }
+            }
+          }
+        },
+        "options_considered": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "required": ["id", "summary", "tradeoffs"],
+            "properties": {
+              "id": { "$ref": "#/$defs/idString" },
+              "summary": { "type": "string" },
+              "tradeoffs": { "$ref": "#/$defs/tradeoffs" },
+              "rejected_because": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "recommendation": {
+          "type": "object",
+          "required": ["chosen_option", "rationale"],
+          "properties": {
+            "chosen_option": { "$ref": "#/$defs/idString" },
+            "rationale": { "type": "string" },
+            "tradeoffs_accepted": { "type": "array" }
+          }
+        },
+        "components": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name", "responsibility", "requirement_ids"],
+            "properties": {
+              "name": { "$ref": "#/$defs/idString" },
+              "responsibility": { "type": "string" },
+              "requirement_ids": { "$ref": "#/$defs/idArray" },
+              "depends_on": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "data_flow": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "step": {},
+              "from": { "type": "string" },
+              "to": { "type": "string" },
+              "payload": { "type": "string" },
+              "protocol": { "type": "string" }
+            }
+          }
+        },
+        "interfaces": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name", "kind", "signature"],
+            "properties": {
+              "name": { "$ref": "#/$defs/idString" },
+              "kind": { "type": "string", "enum": ["REST", "gRPC", "event", "queue", "function"] },
+              "signature": { "type": "string" },
+              "consumers": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "data_model": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "entity": { "type": "string" },
+              "fields": { "type": "array" },
+              "owned_by": { "type": "string" }
+            }
+          }
+        },
+        "technology_choices": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["concern", "choice", "version"],
+            "properties": {
+              "concern": { "type": "string" },
+              "choice": { "type": "string" },
+              "version": { "$ref": "#/$defs/version" },
+              "requirement_ids": { "$ref": "#/$defs/idArray" },
+              "rationale": { "type": "string" }
+            }
+          }
+        },
+        "adrs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/adr" }
+        },
+        "downstream_contract": {
+          "type": "object",
+          "required": ["module_boundaries", "in_scope", "out_of_scope", "interface_signatures"],
+          "properties": {
+            "module_boundaries": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": ["module", "owns", "public_interfaces"],
+                "properties": {
+                  "module": { "$ref": "#/$defs/idString" },
+                  "owns": { "type": "array", "items": { "type": "string" } },
+                  "public_interfaces": { "type": "array", "items": { "type": "string" } },
+                  "in_scope": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            },
+            "in_scope": { "type": "array", "items": { "type": "string" } },
+            "out_of_scope": { "type": "array", "items": { "type": "string" } },
+            "interface_signatures": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "committed": { "type": "boolean" },
+            "commit_sha": { "type": ["string", "null"] },
+            "paths_written": { "type": "array", "items": { "type": "string" } },
+            "index_updated": { "type": "boolean" }
+          }
+        },
+        "self_verification": { "$ref": "#/$defs/selfVerification" }
+      }
+    },
+    "buildResultState": { "type": "string", "enum": ["passed", "failed", "skipped"] },
+    "prPersistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branch", "pr_url", "commit_sha", "paths_written"],
+      "properties": {
+        "branch": { "type": "string" },
+        "pr_url": { "type": "string" },
+        "commit_sha": { "type": "string" },
+        "paths_written": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "implementationManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "feature_id",
+        "module_id",
+        "files",
+        "interface_conformance",
+        "dependencies_used",
+        "build_result",
+        "handoff_to_test",
+        "persistence",
+        "self_verification"
+      ],
+      "properties": {
+        "status": { "const": "COMPLETE" },
+        "feature_id": { "$ref": "#/$defs/idString" },
+        "module_id": { "$ref": "#/$defs/idString" },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["path", "requirement_ids"],
+            "properties": {
+              "path": { "type": "string" },
+              "purpose": { "type": "string" },
+              "requirement_ids": { "$ref": "#/$defs/idArray" }
+            }
+          }
+        },
+        "interface_conformance": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["interface_name", "conforms"],
+            "properties": {
+              "interface_name": { "type": "string" },
+              "conforms": { "const": true },
+              "requirement_ids": { "$ref": "#/$defs/idArray" }
+            }
+          }
+        },
+        "dependencies_used": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "version"],
+            "properties": {
+              "name": { "type": "string" },
+              "version": { "$ref": "#/$defs/version" },
+              "source": { "type": "string", "const": "technology_choices" }
+            }
+          }
+        },
+        "build_result": {
+          "type": "object",
+          "required": ["build", "typecheck", "lint"],
+          "properties": {
+            "build": { "$ref": "#/$defs/buildResultState" },
+            "typecheck": { "$ref": "#/$defs/buildResultState" },
+            "lint": { "$ref": "#/$defs/buildResultState" },
+            "command_log_ref": { "type": "string" }
+          }
+        },
+        "handoff_to_test": {
+          "type": "object",
+          "properties": {
+            "public_interfaces": { "type": "array", "items": { "type": "string" } },
+            "entry_points": { "type": "array", "items": { "type": "string" } },
+            "untested_surfaces": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "persistence": { "$ref": "#/$defs/prPersistence" },
+        "self_verification": { "$ref": "#/$defs/selfVerification" }
+      }
+    },
+    "testManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "feature_id",
+        "module_id",
+        "tests",
+        "coverage_result",
+        "suite_result",
+        "handoff_to_review",
+        "persistence",
+        "self_verification"
+      ],
+      "properties": {
+        "status": { "const": "COMPLETE" },
+        "feature_id": { "$ref": "#/$defs/idString" },
+        "module_id": { "$ref": "#/$defs/idString" },
+        "tests": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id", "file", "category"],
+            "properties": {
+              "id": { "$ref": "#/$defs/idString" },
+              "file": { "type": "string" },
+              "targets_interface": { "type": "string" },
+              "category": {
+                "type": "string",
+                "enum": ["happy_path", "null_empty", "boundary", "invalid_input", "concurrency", "failure_path"]
+              },
+              "requirement_ids": { "$ref": "#/$defs/idArray" },
+              "acceptance_criteria_ids": { "$ref": "#/$defs/idArray" }
+            }
+          }
+        },
+        "coverage_result": {
+          "type": "object",
+          "required": ["threshold", "achieved", "met"],
+          "properties": {
+            "threshold": {},
+            "achieved": {},
+            "met": { "type": "boolean" },
+            "per_file": { "type": "array" }
+          }
+        },
+        "edge_cases_covered": { "type": "array" },
+        "suite_result": {
+          "type": "object",
+          "required": ["total", "passed", "failed"],
+          "properties": {
+            "total": { "type": "integer", "minimum": 0 },
+            "passed": { "type": "integer", "minimum": 0 },
+            "failed": { "type": "integer", "const": 0 },
+            "framework": { "type": "object" },
+            "command_log_ref": { "type": "string" }
+          }
+        },
+        "handoff_to_review": {
+          "type": "object",
+          "properties": {
+            "tested_interfaces": { "type": "array", "items": { "type": "string" } },
+            "acceptance_criteria_verified": { "$ref": "#/$defs/idArray" },
+            "residual_risks": { "type": "array" }
+          }
+        },
+        "persistence": { "$ref": "#/$defs/prPersistence" },
+        "self_verification": { "$ref": "#/$defs/selfVerification" }
+      }
+    }
+  }
+}
