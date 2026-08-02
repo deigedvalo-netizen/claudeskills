@@ -12,14 +12,16 @@
     "architecture_spec": { "$ref": "#/$defs/architectureSpec" },
     "implementation_manifest": { "$ref": "#/$defs/implementationManifest" },
     "test_manifest": { "$ref": "#/$defs/testManifest" },
-    "review_report": { "$ref": "#/$defs/reviewReport" }
+    "review_report": { "$ref": "#/$defs/reviewReport" },
+    "requirements_artifact": { "$ref": "#/$defs/requirementsArtifact" }
   },
   "oneOf": [
     { "required": ["clarification_request"] },
     { "required": ["architecture_spec"] },
     { "required": ["implementation_manifest"] },
     { "required": ["test_manifest"] },
-    { "required": ["review_report"] }
+    { "required": ["review_report"] },
+    { "required": ["requirements_artifact"] }
   ],
   "$defs": {
     "stageName": {
@@ -29,7 +31,8 @@
         "architect-bot",
         "implementation-bot",
         "test-bot",
-        "review-bot"
+        "review-bot",
+        "human-orchestrator"
       ]
     },
     "idString": { "type": "string", "minLength": 1 },
@@ -57,6 +60,11 @@
         "coverage_status": {},
         "edge_case_coverage": {},
         "non_vacuous": {},
+        "requirement_completeness": {},
+        "testability": {},
+        "assumptions_surfaced": {},
+        "constraints_check": {},
+        "id_uniqueness": {},
         "conformance_check": {},
         "handoff_consistency": {},
         "finding_completeness": {},
@@ -589,6 +597,102 @@
             "review_state": { "type": "string", "enum": ["APPROVED", "CHANGES_REQUESTED", "COMMENTED"] },
             "merged": { "type": "boolean" },
             "merge_commit_sha": { "type": ["string", "null"] }
+          }
+        },
+        "self_verification": { "$ref": "#/$defs/selfVerification" }
+      }
+    },
+    "requirementsArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "feature_id",
+        "problem_statement",
+        "in_scope",
+        "out_of_scope",
+        "constraints",
+        "requirements",
+        "self_verification"
+      ],
+      "properties": {
+        "status": { "const": "COMPLETE" },
+        "feature_id": { "$ref": "#/$defs/idString" },
+        "problem_statement": { "type": "string", "minLength": 1 },
+        "in_scope": { "type": "array", "items": { "type": "string" } },
+        "out_of_scope": { "type": "array", "items": { "type": "string" } },
+        "assumptions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "statement"],
+            "properties": {
+              "id": { "$ref": "#/$defs/idString" },
+              "statement": { "type": "string" },
+              "requirement_ids": { "$ref": "#/$defs/idArray" }
+            }
+          }
+        },
+        "constraints": {
+          "type": "object",
+          "required": ["scale", "latency", "cost", "team_size", "existing_stack", "compliance"],
+          "properties": {
+            "scale": { "type": "string", "minLength": 1 },
+            "latency": { "type": "string", "minLength": 1 },
+            "cost": { "type": "string", "minLength": 1 },
+            "team_size": { "type": "string", "minLength": 1 },
+            "existing_stack": { "type": "string", "minLength": 1 },
+            "compliance": { "type": "string", "minLength": 1 }
+          }
+        },
+        "requirements": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id", "type", "statement", "priority", "acceptance_criteria"],
+            "properties": {
+              "id": { "$ref": "#/$defs/idString" },
+              "type": { "type": "string", "enum": ["functional", "non_functional"] },
+              "statement": { "type": "string", "minLength": 1 },
+              "priority": { "type": "string", "enum": ["MUST", "SHOULD", "COULD", "WONT"] },
+              "rationale": { "type": "string" },
+              "depends_on": { "$ref": "#/$defs/idArray" },
+              "acceptance_criteria": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": ["id", "given", "when", "then"],
+                  "properties": {
+                    "id": { "$ref": "#/$defs/idString" },
+                    "given": { "type": "string", "minLength": 1 },
+                    "when": { "type": "string", "minLength": 1 },
+                    "then": { "type": "string", "minLength": 1 }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "glossary": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["term", "definition"],
+            "properties": {
+              "term": { "type": "string" },
+              "definition": { "type": "string" }
+            }
+          }
+        },
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "committed": { "type": "boolean" },
+            "commit_sha": { "type": ["string", "null"] },
+            "paths_written": { "type": "array", "items": { "type": "string" } },
+            "index_updated": { "type": "boolean" }
           }
         },
         "self_verification": { "$ref": "#/$defs/selfVerification" }
