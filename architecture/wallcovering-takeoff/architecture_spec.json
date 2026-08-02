@@ -1,0 +1,1903 @@
+{
+  "architecture_spec": {
+    "status": "COMPLETE",
+    "feature_id": "wallcovering-takeoff",
+    "problem_restatement": "Design a single-user, offline desktop application that ingests a set of PNG construction sheets (finish/millwork schedule, finish plan, ceiling-height plan, elevations) and produces a per-tag wallcovering material takeoff for WC-1, WC-2 and WC-3, honouring a hard architectural boundary between SET-READ values (FR-2: manufacturer, pattern, roll/bolt width, pattern repeat, match type, coverage per unit, captured verbatim from the schedule and never derived) and COMPUTED values (FR-4, FR-5, FR-6: wall area with policy-driven opening deductions, quantity via the strip/drop method when a vertical repeat exists or the area method when it does not, and per-WC aggregation with waste applied exactly once on top of repeat loss). The system must ingest and role-tag sheets (FR-1), resolve WC tags to specific walls of specific rooms including room-level blanket notes overridden by wall-level tags (FR-3), present every number with drill-down to the dimensions and formula behind it (FR-7, NFR-1), and refuse to fabricate any quantity that depends on a missing, ambiguous or contradictory input, routing it instead to a blocking review queue (FR-8). Non-functionally it must be deterministic for identical inputs and settings (NFR-2), run its entire core takeoff path with no network (NFR-3), and treat every machine-read value as provisional until an estimator confirms it (NFR-4), which requires the reading mechanism to be a pluggable adapter behind a stable boundary so that manual entry ships as the trustworthy v1 path and vision or OCR pre-fill can be layered in later without ever reaching the compute path directly.",
+    "reused_adrs": [],
+    "assumptions": [
+      {
+        "id": "ARCH-A1",
+        "statement": "The approved technology universe was supplied to this stage as an unresolved template variable. The technology_choices below were derived solely from the requirement source's stated target stack (Python, a local desktop UI, no server, no website) and from NFR-3 (offline core). Every version is pinned exactly. If the orchestrator maintains a different approved list, treat this assumption as the substitution point and re-run this stage rather than letting implementation bots silently swap libraries.",
+        "requirement_ids": [
+          "NFR-3"
+        ]
+      },
+      {
+        "id": "ARCH-A2",
+        "statement": "Adopting the requirement source's stated recommendation for Q1: printed dimension text is the source of truth for real-world dimensions. Pixel measurement is permitted only as a labelled cross-check and is never the primary number, so no component computes a scale factor from PNG pixel geometry.",
+        "requirement_ids": [
+          "FR-4",
+          "NFR-1",
+          "NFR-4"
+        ]
+      },
+      {
+        "id": "ARCH-A3",
+        "statement": "Adopting the requirement source's stated recommendation for Q2: the finish plan is authoritative for wall widths, the ceiling-height plan is authoritative for wall heights, and elevations act as tie-breaker and as the source for partial-height conditions such as wainscot or back-wall-only application. Plan/elevation disagreement on width is a flagged conflict, not an auto-resolution.",
+        "requirement_ids": [
+          "FR-4",
+          "FR-6",
+          "FR-8"
+        ]
+      },
+      {
+        "id": "ARCH-A4",
+        "statement": "Adopting the requirement source's stated recommendation for Q3: a room is modelled as an explicit set of walls; a room-level note sets a default finish for all walls, and a wall-level tag overrides that default for that wall only. Any room whose override resolution is ambiguous is routed to review rather than guessed.",
+        "requirement_ids": [
+          "FR-3",
+          "FR-8"
+        ]
+      },
+      {
+        "id": "ARCH-A5",
+        "statement": "Adopting the requirement source's stated recommendation for Q4: opening deduction is a configurable policy with an area threshold, default ON at 20 sf, and every deduction taken or skipped is itemised in the drill-down. The threshold is configuration, not a hard-coded constant.",
+        "requirement_ids": [
+          "FR-4",
+          "FR-7",
+          "NFR-1"
+        ]
+      },
+      {
+        "id": "ARCH-A6",
+        "statement": "Adopting the requirement source's stated recommendation for Q5: pattern-repeat loss is computed explicitly by the strip method and is structurally separate from the waste percentage, which covers cutting, trimming, defects and attic stock only. Waste is applied exactly once, after repeat loss, and the architecture forbids any path that multiplies waste into an already repeat-adjusted length twice.",
+        "requirement_ids": [
+          "FR-5",
+          "FR-6"
+        ]
+      },
+      {
+        "id": "ARCH-A7",
+        "statement": "Adopting the requirement source's stated recommendation for Q6: unit of sale is read per WC from that WC's own schedule row. The aggregation layer keeps each WC in its own unit and exposes no cross-unit conversion function.",
+        "requirement_ids": [
+          "FR-2",
+          "FR-5",
+          "FR-6"
+        ]
+      },
+      {
+        "id": "ARCH-A8",
+        "statement": "Adopting the requirement source's stated recommendation for Q7: when match type is absent from the schedule it is recorded as UNKNOWN and raises a blocking flag rather than defaulting to straight match, because half-drop changes cut-length rounding and drop-to-drop yield.",
+        "requirement_ids": [
+          "FR-2",
+          "FR-5",
+          "FR-8"
+        ]
+      },
+      {
+        "id": "ARCH-A9",
+        "statement": "Per source assumptions A1 and A5, only the tags WC-1, WC-2 and WC-3 are in scope, other finish families such as TP-, WB- and PT- are ignored, and all dimensions are imperial feet-and-inches. Metric handling is out of scope for v1 and no unit-system abstraction is designed in.",
+        "requirement_ids": [
+          "FR-2",
+          "FR-3",
+          "FR-4"
+        ]
+      },
+      {
+        "id": "ARCH-A10",
+        "statement": "Per source assumption A3, one run equals one drawing set for one project and no cross-project memory is required, so persistence is a single local project file with no multi-tenant, migration or synchronisation concerns in v1.",
+        "requirement_ids": [
+          "NFR-2"
+        ]
+      },
+      {
+        "id": "ARCH-A11",
+        "statement": "Non-rectangular geometry (sloped ceilings, curved walls, soffit returns) is out of the base planar rectangular model per source assumption A6; such walls accept a manually entered area and are flagged, and the geometry component exposes no curve or trapezoid solver in v1.",
+        "requirement_ids": [
+          "FR-4",
+          "FR-8"
+        ]
+      }
+    ],
+    "options_considered": [
+      {
+        "id": "OPT-1",
+        "summary": "Single-process layered desktop monolith: a PySide6 shell over a pure, I/O-free domain and math core, with reading behind a pluggable ExtractionAdapter whose only v1 implementation is manual estimator entry, and a local SQLite project file for persistence.",
+        "tradeoffs": {
+          "scale": "PRO: sized exactly to the stated load of one drawing set for one estimator per run (source A3); a set is tens of rooms, so in-memory aggregation is trivially sufficient. CON: no horizontal scaling story, which this workload does not need.",
+          "latency": "PRO: every recompute is an in-process pure function call over a small object graph, so edit-to-recompute is effectively instantaneous and satisfies the interactive edit loop in AC-7.2 with no IPC or serialization hop.",
+          "cost": "PRO: zero infrastructure cost, no server, no per-call API spend on the v1 path; distributable as one binary. CON: none material at this scale.",
+          "team_size": "PRO: one codebase, one language, one process to debug; the smallest surface a small team can carry, and the phased build list in the source maps onto it directly. CON: requires discipline (enforced here by module boundaries and ADR-002) to stop UI concerns leaking into the math core.",
+          "existing_stack": "PRO: matches the stated target stack exactly (Python, local desktop UI, no server, no website) with no additional runtime.",
+          "compliance": "PRO: satisfies NFR-3 by construction because the core path has no network client at all; drawing sets never leave the machine unless the optional, clearly-labelled vision adapter is explicitly enabled."
+        },
+        "rejected_because": null
+      },
+      {
+        "id": "OPT-2",
+        "summary": "Split local client plus a local HTTP service: the math and reading engines run as a localhost REST service, with the desktop UI as a thin client calling it.",
+        "tradeoffs": {
+          "scale": "NEUTRAL: allows a future multi-user or batch deployment, but that scale is explicitly not required (source A3), so the capacity is unused.",
+          "latency": "CON: inserts serialization plus a loopback round trip into the edit-recompute loop that AC-7.2 puts on the interactive path, for no functional gain.",
+          "cost": "CON: higher build and packaging cost; a bundled desktop app must now supervise a child service process, manage ports and handle its crash and restart lifecycle.",
+          "team_size": "CON: two deployable units, two failure domains and a wire contract to version, which is a poor trade for a small team building a single-user tool.",
+          "existing_stack": "NEUTRAL: still Python, but adds a web framework and an ASGI server that the stated stack (no server) does not call for.",
+          "compliance": "CON: opens a local listening socket and a serialized boundary that must then be argued as safe against NFR-3, whereas OPT-1 has no socket to defend."
+        },
+        "rejected_because": "Adds a network boundary, its latency and its lifecycle management to a single-user offline tool that has no distribution requirement, directly contradicting the stated 'no server' stack and weakening the NFR-3 offline story it was supposed to leave untouched."
+      },
+      {
+        "id": "OPT-3",
+        "summary": "Headless pipeline: a CLI plus structured input files that emits a spreadsheet takeoff, with no interactive GUI and review handled by editing the input files and re-running.",
+        "tradeoffs": {
+          "scale": "PRO: trivially scriptable across many sets at once, which exceeds but does not conflict with the stated scale.",
+          "latency": "PRO: batch throughput is excellent. CON: the human correction loop becomes edit-file-and-rerun rather than the immediate recompute-on-edit that AC-7.2 requires.",
+          "cost": "PRO: cheapest to build of the three; no UI layer at all.",
+          "team_size": "PRO: smallest possible codebase for a small team.",
+          "existing_stack": "PRO: pure Python, no UI toolkit dependency, no packaging of a GUI runtime.",
+          "compliance": "PRO: fully offline and fully deterministic; strongest NFR-2 and NFR-3 story of the three."
+        },
+        "rejected_because": "Cannot satisfy the interactive requirements: FR-1 requires dropping in sheets with thumbnails and role assignment, FR-7 and AC-7.1 require an on-screen drill-down from an order line into the contributing walls and formulas, AC-7.2 requires per-value source display with recompute on edit, and FR-8 requires a live review queue. A file-and-rerun loop makes the estimator confirmation gate that NFR-4 depends on unenforceable."
+      }
+    ],
+    "recommendation": {
+      "chosen_option": "OPT-1",
+      "rationale": "OPT-1 is the only option that satisfies the interactive review obligations (FR-7, AC-7.1, AC-7.2, FR-8, NFR-4) without importing infrastructure the constraints reject. OPT-3 is cheaper but structurally cannot host the drill-down, the per-value source display with recompute-on-edit, or the live blocking review queue, which are the mechanisms by which the source's central discipline (never ship an unconfirmed machine-read number into an order) is actually enforced. OPT-2 buys distribution and multi-user capacity that source assumption A3 explicitly says is not needed, and pays for it with a loopback hop inside the AC-7.2 edit loop, a second deployable unit for a small team, and an open local socket that weakens the NFR-3 offline argument OPT-1 gets for free by having no network client on the core path at all. OPT-1 also lets the phased delivery in the source hold: because the math core is pure and I/O-free (ADR-003) and all reading enters through one adapter port (ADR-004), the manual-entry v1 and the later vision pre-fill differ only in which adapter is registered, with no change to the domain, the math, the review queue or the export. Finally, the set-read versus compute boundary that the source calls a hard line is representable in OPT-1 as a module and type boundary (ADR-002) that downstream review bots can mechanically check, rather than as a convention that has to be manually policed across a wire protocol.",
+      "tradeoffs_accepted": [
+        "No multi-user, client-server or web deployment path in v1; adding one later means introducing a transport boundary that does not exist today.",
+        "The math core cannot be consumed by a non-Python client without adding an explicit interop layer, since its contract is a set of Python function signatures rather than a wire schema.",
+        "Layer separation inside a single process is enforced by module boundaries, typing and review rather than by process isolation, so it is a discipline that can be violated by a careless import and must be checked in review.",
+        "A GUI runtime (Qt via PySide6) must be packaged and distributed, making the artifact substantially larger than the headless OPT-3 alternative.",
+        "Batch processing of many drawing sets is not supported in v1; each run is one set, one estimator, one interactive session.",
+        "Rejecting pixel-derived scale (ARCH-A2) means an illegible dimension has no automated fallback and must be entered by hand, trading recall for the guarantee that no fabricated dimension reaches a quantity."
+      ]
+    },
+    "components": [
+      {
+        "name": "SheetIngestService",
+        "responsibility": "Accept PNG files into a DrawingSet, reject non-PNG or unreadable files with a clear message, generate thumbnails, assign or infer each sheet role, and flag any sheet left unlabelled.",
+        "requirement_ids": [
+          "FR-1"
+        ],
+        "depends_on": [
+          "ProjectRepository",
+          "FlagRegistry"
+        ]
+      },
+      {
+        "name": "SetReadRegistry",
+        "responsibility": "Store each WC definition verbatim as captured from the schedule (manufacturer, pattern, roll or bolt width, pattern repeat, match type, coverage per unit, unit of sale) and mark any field the takeoff needs but the schedule omits as UNKNOWN. Exposes no arithmetic whatsoever.",
+        "requirement_ids": [
+          "FR-2",
+          "NFR-1"
+        ],
+        "depends_on": [
+          "ProjectRepository",
+          "FlagRegistry"
+        ]
+      },
+      {
+        "name": "ApplicationResolver",
+        "responsibility": "Resolve WC tags to concrete (room, wall) applications, applying a room-level blanket note as a default across the room's walls and letting a wall-level tag override that default for that wall only; route any application whose target wall or room is not unambiguously determinable to the review queue instead of guessing.",
+        "requirement_ids": [
+          "FR-3",
+          "FR-8"
+        ],
+        "depends_on": [
+          "SetReadRegistry",
+          "FlagRegistry",
+          "ProjectRepository"
+        ]
+      },
+      {
+        "name": "GeometryService",
+        "responsibility": "Derive gross and net wall area for each application from wall width and applied height, apply the opening-deduction policy with its area threshold, itemise every opening deducted and every opening skipped, and block area derivation for any room whose ceiling height is missing rather than substituting a default.",
+        "requirement_ids": [
+          "FR-4",
+          "FR-8"
+        ],
+        "depends_on": [
+          "PolicyStore",
+          "FlagRegistry",
+          "TraceLedger"
+        ]
+      },
+      {
+        "name": "TakeoffEngine",
+        "responsibility": "Pure, I/O-free computation of ordered quantity from net area and a WC definition: select the strip or drop method when a vertical repeat is present and the area method when it is absent, compute drops, repeat-rounded cut length and total length, then apply the waste percentage exactly once on top of repeat loss, preserving raw and with-waste figures distinctly.",
+        "requirement_ids": [
+          "FR-5",
+          "NFR-2"
+        ],
+        "depends_on": []
+      },
+      {
+        "name": "AggregationService",
+        "responsibility": "Roll every application of a WC across all rooms, walls and sheets into a single order line per WC, de-duplicating by (room, wall) identity so a wall appearing on both plan and elevation is counted once, and rounding up to that WC's own sale unit without ever converting between units.",
+        "requirement_ids": [
+          "FR-6",
+          "FR-5"
+        ],
+        "depends_on": [
+          "TakeoffEngine",
+          "FlagRegistry",
+          "TraceLedger"
+        ]
+      },
+      {
+        "name": "FlagRegistry",
+        "responsibility": "Own the review queue: record every missing, ambiguous or contradictory input as a flag carrying its originating sheet, its subject reference and what it blocks, and answer whether a given computation target is blocked. A blocking flag prevents any dependent quantity from being computed.",
+        "requirement_ids": [
+          "FR-8",
+          "FR-2",
+          "FR-3",
+          "FR-4"
+        ],
+        "depends_on": [
+          "ProjectRepository"
+        ]
+      },
+      {
+        "name": "ExtractionPort",
+        "responsibility": "Stable adapter boundary through which all reading of tags, dimensions and schedule rows enters the system. Every proposal it yields carries a source, a confidence and a provisional status; no proposal can reach TakeoffEngine without passing the confirmation gate.",
+        "requirement_ids": [
+          "FR-3",
+          "FR-4",
+          "NFR-4"
+        ],
+        "depends_on": []
+      },
+      {
+        "name": "ManualEntryAdapter",
+        "responsibility": "The v1 ExtractionPort implementation: estimator-typed widths, heights, tags, openings and schedule fields, entered against the displayed sheet and marked confirmed at source.",
+        "requirement_ids": [
+          "FR-2",
+          "FR-3",
+          "FR-4",
+          "NFR-3"
+        ],
+        "depends_on": [
+          "ExtractionPort"
+        ]
+      },
+      {
+        "name": "VisionPrefillAdapter",
+        "responsibility": "Deferred v1.1 ExtractionPort implementation that pre-fills the same editable forms with proposed values plus source and confidence, routing low-confidence or ambiguous proposals to the review queue. It is opt-in, clearly labelled as leaving the machine, and structurally incapable of invoking the compute path.",
+        "requirement_ids": [
+          "FR-3",
+          "FR-4",
+          "NFR-3",
+          "NFR-4"
+        ],
+        "depends_on": [
+          "ExtractionPort",
+          "FlagRegistry"
+        ]
+      },
+      {
+        "name": "ConfirmationGate",
+        "responsibility": "Enforce that no value originating from a non-manual adapter is treated as final until an estimator has confirmed it, and refuse to mark a takeoff final while any unconfirmed read value or blocking flag contributes to it.",
+        "requirement_ids": [
+          "NFR-4",
+          "FR-8"
+        ],
+        "depends_on": [
+          "FlagRegistry",
+          "ExtractionPort"
+        ]
+      },
+      {
+        "name": "PolicyStore",
+        "responsibility": "Hold the takeoff settings as explicit configuration: waste percentage (global with optional per-WC override), opening-deduction on/off and its area threshold, and trim allowance. Every computed result records the policy snapshot it was produced under.",
+        "requirement_ids": [
+          "FR-4",
+          "FR-5",
+          "NFR-2"
+        ],
+        "depends_on": [
+          "ProjectRepository"
+        ]
+      },
+      {
+        "name": "TraceLedger",
+        "responsibility": "Record, for every computed number, the formula applied, the input values consumed and the sheet each input came from, so any on-screen figure can be expanded into its derivation with no black-box totals.",
+        "requirement_ids": [
+          "NFR-1",
+          "FR-7"
+        ],
+        "depends_on": []
+      },
+      {
+        "name": "TakeoffPresenter",
+        "responsibility": "Build the read-model the UI renders: one order line per WC, drill-down to contributing rooms and walls with width, height, deductions, net area and drop math, the verbatim set-read reference block labelled as non-computed, the policy summary, and the review queue; recompute on edit of any value.",
+        "requirement_ids": [
+          "FR-7",
+          "NFR-1"
+        ],
+        "depends_on": [
+          "AggregationService",
+          "SetReadRegistry",
+          "TraceLedger",
+          "FlagRegistry",
+          "PolicyStore"
+        ]
+      },
+      {
+        "name": "ExportService",
+        "responsibility": "Emit the handoff takeoff as a spreadsheet for ordering and a printable summary document, showing raw and with-waste figures side by side and rounding nothing away silently.",
+        "requirement_ids": [
+          "FR-7"
+        ],
+        "depends_on": [
+          "TakeoffPresenter"
+        ]
+      },
+      {
+        "name": "ProjectRepository",
+        "responsibility": "Persist the whole project (drawing set, sheet roles, WC definitions, rooms, walls, openings, applications, policy snapshot, flags) to a single local file, so that reopening a project and recomputing yields byte-identical results.",
+        "requirement_ids": [
+          "NFR-2"
+        ],
+        "depends_on": []
+      },
+      {
+        "name": "DesktopShell",
+        "responsibility": "The application window: sheet import and role assignment, zoomable sheet viewer, set-read entry forms, application and dimension entry, policy panel, review queue panel and the takeoff view. Contains no takeoff arithmetic.",
+        "requirement_ids": [
+          "FR-1",
+          "FR-7"
+        ],
+        "depends_on": [
+          "TakeoffPresenter",
+          "ManualEntryAdapter",
+          "SheetIngestService",
+          "PolicyStore",
+          "ConfirmationGate"
+        ]
+      }
+    ],
+    "data_flow": [
+      {
+        "step": 1,
+        "from": "Estimator",
+        "to": "SheetIngestService",
+        "payload": "PNG sheet files for one drawing set",
+        "protocol": "in-process function call (file drop)"
+      },
+      {
+        "step": 2,
+        "from": "SheetIngestService",
+        "to": "ProjectRepository",
+        "payload": "DrawingSet with role-tagged Sheet records and thumbnails; unlabelled sheets flagged",
+        "protocol": "in-process function call"
+      },
+      {
+        "step": 3,
+        "from": "ExtractionPort",
+        "to": "SetReadRegistry",
+        "payload": "SET READ: WCDefinition fields captured verbatim from the schedule, each with source and confirmed status",
+        "protocol": "in-process function call"
+      },
+      {
+        "step": 4,
+        "from": "ExtractionPort",
+        "to": "ApplicationResolver",
+        "payload": "READ: WC tags, room-level blanket notes and wall-level override tags",
+        "protocol": "in-process function call"
+      },
+      {
+        "step": 5,
+        "from": "ExtractionPort",
+        "to": "GeometryService",
+        "payload": "READ: wall widths from the finish plan, wall heights from the ceiling-height plan, applied heights and openings from elevations",
+        "protocol": "in-process function call"
+      },
+      {
+        "step": 6,
+        "from": "ConfirmationGate",
+        "to": "TakeoffEngine",
+        "payload": "REVIEW GATE: only confirmed, unflagged values pass; any blocking flag stops that item here",
+        "protocol": "in-process guard call"
+      },
+      {
+        "step": 7,
+        "from": "GeometryService",
+        "to": "TakeoffEngine",
+        "payload": "COMPUTE: net area per application after policy-driven opening deductions, with deductions itemised",
+        "protocol": "in-process function call"
+      },
+      {
+        "step": 8,
+        "from": "SetReadRegistry",
+        "to": "TakeoffEngine",
+        "payload": "Fixed constants: roll width, repeat, match type, unit of sale, yield. Consumed, never recomputed",
+        "protocol": "in-process function call"
+      },
+      {
+        "step": 9,
+        "from": "TakeoffEngine",
+        "to": "AggregationService",
+        "payload": "COMPUTE: per-application quantity with raw and with-waste figures and the method used",
+        "protocol": "in-process function call"
+      },
+      {
+        "step": 10,
+        "from": "AggregationService",
+        "to": "TakeoffPresenter",
+        "payload": "One TakeoffLine per WC in that WC's own sale unit, de-duplicated by (room, wall)",
+        "protocol": "in-process function call"
+      },
+      {
+        "step": 11,
+        "from": "TraceLedger",
+        "to": "TakeoffPresenter",
+        "payload": "Formula and source provenance for every displayed number",
+        "protocol": "in-process function call"
+      },
+      {
+        "step": 12,
+        "from": "FlagRegistry",
+        "to": "TakeoffPresenter",
+        "payload": "Review queue: flags with originating sheet and what each blocks",
+        "protocol": "in-process function call"
+      },
+      {
+        "step": 13,
+        "from": "TakeoffPresenter",
+        "to": "DesktopShell",
+        "payload": "Read-model: order lines, drill-down, set-read reference block, policy summary, review queue",
+        "protocol": "in-process function call"
+      },
+      {
+        "step": 14,
+        "from": "TakeoffPresenter",
+        "to": "ExportService",
+        "payload": "Finalised takeoff for spreadsheet and printable export, raw and with-waste both retained",
+        "protocol": "in-process function call"
+      },
+      {
+        "step": 15,
+        "from": "DesktopShell",
+        "to": "GeometryService",
+        "payload": "Estimator edit of any read value, triggering recompute of dependent quantities",
+        "protocol": "in-process function call (recompute loop)"
+      }
+    ],
+    "interfaces": [
+      {
+        "name": "IngestSheets",
+        "kind": "function",
+        "signature": "ingest_sheets(paths: Sequence[Path], set_id: SetId) -> IngestResult  # IngestResult{accepted: list[Sheet], rejected: list[RejectedFile{path, reason}], unlabelled: list[SheetId]}; raises nothing, rejects non-PNG/unreadable into rejected",
+        "consumers": [
+          "DesktopShell",
+          "implementation-bot",
+          "test-bot"
+        ]
+      },
+      {
+        "name": "AssignSheetRole",
+        "kind": "function",
+        "signature": "assign_sheet_role(sheet_id: SheetId, role: SheetRole) -> Sheet  # SheetRole in {SCHEDULE, FINISH_PLAN, CEILING_HEIGHT_PLAN, ELEVATION, UNASSIGNED}",
+        "consumers": [
+          "DesktopShell",
+          "SheetIngestService"
+        ]
+      },
+      {
+        "name": "UpsertWCDefinition",
+        "kind": "function",
+        "signature": "upsert_wc_definition(defn: WCDefinition) -> WCDefinition  # stores verbatim; any required-but-absent field must be UNKNOWN sentinel, never imputed",
+        "consumers": [
+          "ManualEntryAdapter",
+          "VisionPrefillAdapter",
+          "implementation-bot"
+        ]
+      },
+      {
+        "name": "GetWCDefinition",
+        "kind": "function",
+        "signature": "get_wc_definition(wc_tag: str) -> WCDefinition | None  # None means defined-but-missing; caller must flag, not default",
+        "consumers": [
+          "TakeoffEngine",
+          "TakeoffPresenter",
+          "ApplicationResolver"
+        ]
+      },
+      {
+        "name": "ResolveApplications",
+        "kind": "function",
+        "signature": "resolve_applications(set_id: SetId, room_notes: Sequence[RoomNote], wall_tags: Sequence[WallTag]) -> ApplicationResolution  # ApplicationResolution{applications: list[Application], ambiguous: list[Flag]}; wall-level tag overrides room-level default",
+        "consumers": [
+          "AggregationService",
+          "TakeoffPresenter",
+          "implementation-bot",
+          "test-bot"
+        ]
+      },
+      {
+        "name": "ComputeWallArea",
+        "kind": "function",
+        "signature": "compute_wall_area(wall: Wall, openings: Sequence[Opening], policy: OpeningPolicy) -> AreaResult  # AreaResult{gross_sf: Decimal, net_sf: Decimal, deducted: list[Opening], skipped: list[Opening]}; raises MissingHeightError when wall.height is None",
+        "consumers": [
+          "TakeoffEngine",
+          "TakeoffPresenter",
+          "test-bot"
+        ]
+      },
+      {
+        "name": "SelectTakeoffMethod",
+        "kind": "function",
+        "signature": "select_takeoff_method(defn: WCDefinition) -> TakeoffMethod  # STRIP when defn.repeat_in > 0, AREA when repeat_in == 0 or match type is RANDOM",
+        "consumers": [
+          "TakeoffEngine",
+          "test-bot"
+        ]
+      },
+      {
+        "name": "ComputeQuantityStrip",
+        "kind": "function",
+        "signature": "compute_quantity_strip(wall_width_in: Decimal, wall_height_in: Decimal, defn: WCDefinition, policy: WastePolicy) -> QuantityResult  # drops = ceil(width/roll_width); cut_length = ceil((height + trim_allow)/repeat) * repeat; total = drops * cut_length; raw_ly = total/36; waste applied once",
+        "consumers": [
+          "AggregationService",
+          "test-bot",
+          "review-bot"
+        ]
+      },
+      {
+        "name": "ComputeQuantityArea",
+        "kind": "function",
+        "signature": "compute_quantity_area(net_area_sf: Decimal, defn: WCDefinition, policy: WastePolicy) -> QuantityResult  # net_sy = net_area_sf/9; order_sy = net_sy*(1+waste); units = ceil(order_sy/coverage_per_unit_sy)",
+        "consumers": [
+          "AggregationService",
+          "test-bot",
+          "review-bot"
+        ]
+      },
+      {
+        "name": "AggregateByWC",
+        "kind": "function",
+        "signature": "aggregate_by_wc(results: Sequence[QuantityResult], policy: WastePolicy) -> list[TakeoffLine]  # de-duplicates by (room_id, wall_id); TakeoffLine carries raw_qty, with_waste_qty, order_qty and unit; never converts across units",
+        "consumers": [
+          "TakeoffPresenter",
+          "ExportService",
+          "test-bot"
+        ]
+      },
+      {
+        "name": "RaiseFlag",
+        "kind": "function",
+        "signature": "raise_flag(flag: Flag) -> FlagId  # Flag{kind, subject_ref, source_sheet_id, blocks, detail}; kind in {UNKNOWN_SCHEDULE_FIELD, MISSING_HEIGHT, UNRESOLVED_UNO, UNDEFINED_WC, UNUSED_WC, CONFLICT, UNREADABLE_DIMENSION, NON_RECTANGULAR, UNKNOWN_MATCH_TYPE}",
+        "consumers": [
+          "ApplicationResolver",
+          "GeometryService",
+          "SetReadRegistry",
+          "VisionPrefillAdapter"
+        ]
+      },
+      {
+        "name": "BlockingFlagsFor",
+        "kind": "function",
+        "signature": "blocking_flags_for(subject_ref: SubjectRef) -> list[Flag]  # non-empty result MUST prevent computation of any dependent quantity",
+        "consumers": [
+          "ConfirmationGate",
+          "TakeoffEngine",
+          "TakeoffPresenter",
+          "review-bot"
+        ]
+      },
+      {
+        "name": "ExtractionAdapter",
+        "kind": "function",
+        "signature": "class ExtractionAdapter(Protocol): def propose(self, sheet: Sheet) -> list[Proposal]; def source_label(self) -> str  # Proposal{field_ref, value, source_sheet_id, confidence: Decimal, confirmed: bool = False}",
+        "consumers": [
+          "ManualEntryAdapter",
+          "VisionPrefillAdapter",
+          "implementation-bot"
+        ]
+      },
+      {
+        "name": "ConfirmValue",
+        "kind": "function",
+        "signature": "confirm_value(field_ref: FieldRef, value: object, confirmed_by: str) -> ConfirmedValue  # only ConfirmedValue instances may enter TakeoffEngine",
+        "consumers": [
+          "ConfirmationGate",
+          "DesktopShell",
+          "test-bot"
+        ]
+      },
+      {
+        "name": "IsTakeoffFinalisable",
+        "kind": "function",
+        "signature": "is_takeoff_finalisable(set_id: SetId) -> FinalisationStatus  # FinalisationStatus{finalisable: bool, unconfirmed: list[FieldRef], blocking: list[FlagId]}",
+        "consumers": [
+          "DesktopShell",
+          "ExportService",
+          "review-bot"
+        ]
+      },
+      {
+        "name": "GetPolicySnapshot",
+        "kind": "function",
+        "signature": "get_policy_snapshot(set_id: SetId) -> PolicySnapshot  # PolicySnapshot{waste_pct: Decimal, per_wc_waste: Mapping[str, Decimal], deduct_openings: bool, opening_threshold_sf: Decimal, trim_allowance_in: Decimal}",
+        "consumers": [
+          "TakeoffEngine",
+          "GeometryService",
+          "TakeoffPresenter",
+          "ExportService"
+        ]
+      },
+      {
+        "name": "RecordTrace",
+        "kind": "function",
+        "signature": "record_trace(value_id: ValueId, formula: str, inputs: Mapping[str, Decimal], sources: Sequence[SourceRef]) -> TraceRecord",
+        "consumers": [
+          "GeometryService",
+          "TakeoffEngine",
+          "AggregationService"
+        ]
+      },
+      {
+        "name": "ExplainValue",
+        "kind": "function",
+        "signature": "explain_value(value_id: ValueId) -> TraceRecord  # every displayed number must resolve; unresolvable value_id is a defect",
+        "consumers": [
+          "TakeoffPresenter",
+          "DesktopShell",
+          "review-bot"
+        ]
+      },
+      {
+        "name": "BuildTakeoffView",
+        "kind": "function",
+        "signature": "build_takeoff_view(set_id: SetId) -> TakeoffView  # TakeoffView{lines: list[TakeoffLineView], set_read_block: list[WCDefinition], policy_summary: PolicySnapshot, review_queue: list[Flag]}",
+        "consumers": [
+          "DesktopShell",
+          "ExportService"
+        ]
+      },
+      {
+        "name": "ExportTakeoff",
+        "kind": "function",
+        "signature": "export_takeoff(view: TakeoffView, fmt: ExportFormat, dest: Path) -> Path  # ExportFormat in {XLSX, PDF}; both raw and with-waste figures required in output",
+        "consumers": [
+          "DesktopShell",
+          "implementation-bot"
+        ]
+      },
+      {
+        "name": "SaveProject",
+        "kind": "function",
+        "signature": "save_project(set_id: SetId, dest: Path) -> Path",
+        "consumers": [
+          "DesktopShell"
+        ]
+      },
+      {
+        "name": "LoadProject",
+        "kind": "function",
+        "signature": "load_project(src: Path) -> SetId  # reload plus recompute must reproduce identical figures (NFR-2)",
+        "consumers": [
+          "DesktopShell",
+          "test-bot"
+        ]
+      }
+    ],
+    "data_model": [
+      {
+        "entity": "DrawingSet",
+        "owned_by": "ProjectRepository",
+        "fields": [
+          {
+            "name": "set_id",
+            "type": "SetId",
+            "constraints": "primary key, uuid4"
+          },
+          {
+            "name": "project_name",
+            "type": "str",
+            "constraints": "required, non-empty"
+          },
+          {
+            "name": "sheets",
+            "type": "list[Sheet]",
+            "constraints": "min 1"
+          },
+          {
+            "name": "created_at",
+            "type": "datetime",
+            "constraints": "UTC, set once"
+          }
+        ]
+      },
+      {
+        "entity": "Sheet",
+        "owned_by": "SheetIngestService",
+        "fields": [
+          {
+            "name": "sheet_id",
+            "type": "SheetId",
+            "constraints": "primary key"
+          },
+          {
+            "name": "path",
+            "type": "Path",
+            "constraints": "required, must resolve to a readable PNG"
+          },
+          {
+            "name": "role",
+            "type": "SheetRole",
+            "constraints": "enum SCHEDULE|FINISH_PLAN|CEILING_HEIGHT_PLAN|ELEVATION|UNASSIGNED; UNASSIGNED raises a flag"
+          },
+          {
+            "name": "sheet_number",
+            "type": "str | None",
+            "constraints": "optional, used for role inference"
+          },
+          {
+            "name": "thumbnail",
+            "type": "bytes",
+            "constraints": "generated at ingest"
+          }
+        ]
+      },
+      {
+        "entity": "WCDefinition",
+        "owned_by": "SetReadRegistry",
+        "fields": [
+          {
+            "name": "wc_tag",
+            "type": "str",
+            "constraints": "primary key, one of WC-1|WC-2|WC-3 in v1"
+          },
+          {
+            "name": "manufacturer",
+            "type": "str | UNKNOWN",
+            "constraints": "SET READ, verbatim"
+          },
+          {
+            "name": "pattern_name",
+            "type": "str | UNKNOWN",
+            "constraints": "SET READ, verbatim"
+          },
+          {
+            "name": "roll_width_in",
+            "type": "Decimal | UNKNOWN",
+            "constraints": "SET READ; UNKNOWN blocks quantity for this WC"
+          },
+          {
+            "name": "repeat_in",
+            "type": "Decimal | UNKNOWN",
+            "constraints": "SET READ; 0 means no repeat, selects area method"
+          },
+          {
+            "name": "match_type",
+            "type": "MatchType | UNKNOWN",
+            "constraints": "enum STRAIGHT|HALF_DROP|RANDOM; UNKNOWN raises a blocking flag, never defaults to STRAIGHT"
+          },
+          {
+            "name": "unit_of_sale",
+            "type": "UnitOfSale",
+            "constraints": "enum LINEAR_YARD|ROLL; read per WC independently"
+          },
+          {
+            "name": "yield_per_unit",
+            "type": "Decimal | UNKNOWN",
+            "constraints": "SET READ; bolt yield in LY or coverage in sy per roll"
+          },
+          {
+            "name": "source_sheet_id",
+            "type": "SheetId",
+            "constraints": "required for provenance"
+          }
+        ]
+      },
+      {
+        "entity": "Room",
+        "owned_by": "ApplicationResolver",
+        "fields": [
+          {
+            "name": "room_id",
+            "type": "RoomId",
+            "constraints": "primary key"
+          },
+          {
+            "name": "room_number",
+            "type": "str",
+            "constraints": "required, as printed on the plan"
+          },
+          {
+            "name": "ceiling_height_in",
+            "type": "Decimal | None",
+            "constraints": "None blocks area derivation; no default is ever assumed"
+          },
+          {
+            "name": "walls",
+            "type": "list[Wall]",
+            "constraints": "explicit wall set; blanket notes apply across this set"
+          },
+          {
+            "name": "blanket_note",
+            "type": "str | None",
+            "constraints": "room-level default finish, overridden per wall"
+          }
+        ]
+      },
+      {
+        "entity": "Wall",
+        "owned_by": "GeometryService",
+        "fields": [
+          {
+            "name": "wall_id",
+            "type": "WallId",
+            "constraints": "primary key; (room_id, wall_id) is the de-duplication identity"
+          },
+          {
+            "name": "orientation",
+            "type": "str",
+            "constraints": "e.g. NORTH|SOUTH|EAST|WEST or a named designation"
+          },
+          {
+            "name": "width_in",
+            "type": "Decimal | None",
+            "constraints": "authoritative source is the finish plan"
+          },
+          {
+            "name": "applied_height_in",
+            "type": "Decimal | None",
+            "constraints": "ceiling height by default; elevation overrides for partial-height conditions"
+          },
+          {
+            "name": "openings",
+            "type": "list[Opening]",
+            "constraints": "may be empty"
+          },
+          {
+            "name": "manual_area_sf",
+            "type": "Decimal | None",
+            "constraints": "escape hatch for non-rectangular walls; presence bypasses width x height and requires a flag"
+          }
+        ]
+      },
+      {
+        "entity": "Opening",
+        "owned_by": "GeometryService",
+        "fields": [
+          {
+            "name": "opening_id",
+            "type": "OpeningId",
+            "constraints": "primary key"
+          },
+          {
+            "name": "kind",
+            "type": "str",
+            "constraints": "DOOR|WINDOW|STOREFRONT|CASEWORK|OTHER"
+          },
+          {
+            "name": "width_in",
+            "type": "Decimal",
+            "constraints": "required, > 0"
+          },
+          {
+            "name": "height_in",
+            "type": "Decimal",
+            "constraints": "required, > 0"
+          },
+          {
+            "name": "area_sf",
+            "type": "Decimal",
+            "constraints": "derived; compared against the policy threshold"
+          }
+        ]
+      },
+      {
+        "entity": "Application",
+        "owned_by": "ApplicationResolver",
+        "fields": [
+          {
+            "name": "application_id",
+            "type": "ApplicationId",
+            "constraints": "primary key"
+          },
+          {
+            "name": "wc_tag",
+            "type": "str",
+            "constraints": "must match a WCDefinition or raise UNDEFINED_WC"
+          },
+          {
+            "name": "room_id",
+            "type": "RoomId",
+            "constraints": "required"
+          },
+          {
+            "name": "wall_id",
+            "type": "WallId",
+            "constraints": "required; unique per (wc_tag, room_id, wall_id)"
+          },
+          {
+            "name": "origin",
+            "type": "str",
+            "constraints": "ROOM_BLANKET|WALL_OVERRIDE|ELEVATION_TAG; wall override wins over room blanket"
+          },
+          {
+            "name": "source_sheet_id",
+            "type": "SheetId",
+            "constraints": "required for conflict detection across sheets"
+          }
+        ]
+      },
+      {
+        "entity": "QuantityResult",
+        "owned_by": "TakeoffEngine",
+        "fields": [
+          {
+            "name": "application_id",
+            "type": "ApplicationId",
+            "constraints": "required"
+          },
+          {
+            "name": "method",
+            "type": "TakeoffMethod",
+            "constraints": "STRIP|AREA"
+          },
+          {
+            "name": "drops",
+            "type": "int | None",
+            "constraints": "STRIP only"
+          },
+          {
+            "name": "cut_length_in",
+            "type": "Decimal | None",
+            "constraints": "STRIP only; repeat-rounded"
+          },
+          {
+            "name": "net_area_sf",
+            "type": "Decimal",
+            "constraints": "required"
+          },
+          {
+            "name": "raw_qty",
+            "type": "Decimal",
+            "constraints": "pre-waste, repeat loss already included for STRIP"
+          },
+          {
+            "name": "with_waste_qty",
+            "type": "Decimal",
+            "constraints": "waste applied exactly once"
+          },
+          {
+            "name": "unit",
+            "type": "UnitOfSale",
+            "constraints": "inherited from the WC definition, never converted"
+          }
+        ]
+      },
+      {
+        "entity": "TakeoffLine",
+        "owned_by": "AggregationService",
+        "fields": [
+          {
+            "name": "wc_tag",
+            "type": "str",
+            "constraints": "primary key within a set"
+          },
+          {
+            "name": "contributing",
+            "type": "list[ApplicationId]",
+            "constraints": "de-duplicated by (room_id, wall_id)"
+          },
+          {
+            "name": "raw_qty",
+            "type": "Decimal",
+            "constraints": "sum of contributing raw quantities"
+          },
+          {
+            "name": "with_waste_qty",
+            "type": "Decimal",
+            "constraints": "waste applied once at the line level"
+          },
+          {
+            "name": "order_qty",
+            "type": "Decimal",
+            "constraints": "rounded UP to the sale unit; never rounded down"
+          },
+          {
+            "name": "unit",
+            "type": "UnitOfSale",
+            "constraints": "this WC's own unit"
+          },
+          {
+            "name": "blocked_by",
+            "type": "list[FlagId]",
+            "constraints": "non-empty means no quantity is emitted for this line"
+          }
+        ]
+      },
+      {
+        "entity": "Flag",
+        "owned_by": "FlagRegistry",
+        "fields": [
+          {
+            "name": "flag_id",
+            "type": "FlagId",
+            "constraints": "primary key"
+          },
+          {
+            "name": "kind",
+            "type": "FlagKind",
+            "constraints": "UNKNOWN_SCHEDULE_FIELD|MISSING_HEIGHT|UNRESOLVED_UNO|UNDEFINED_WC|UNUSED_WC|CONFLICT|UNREADABLE_DIMENSION|NON_RECTANGULAR|UNKNOWN_MATCH_TYPE"
+          },
+          {
+            "name": "subject_ref",
+            "type": "SubjectRef",
+            "constraints": "what the flag is about"
+          },
+          {
+            "name": "source_sheet_id",
+            "type": "SheetId | None",
+            "constraints": "the sheet it came from, where applicable"
+          },
+          {
+            "name": "blocks",
+            "type": "list[str]",
+            "constraints": "what computation this flag prevents"
+          },
+          {
+            "name": "detail",
+            "type": "str",
+            "constraints": "required, human-readable"
+          }
+        ]
+      },
+      {
+        "entity": "PolicySnapshot",
+        "owned_by": "PolicyStore",
+        "fields": [
+          {
+            "name": "waste_pct",
+            "type": "Decimal",
+            "constraints": "global default, 0.10 to 0.15 typical"
+          },
+          {
+            "name": "per_wc_waste",
+            "type": "Mapping[str, Decimal]",
+            "constraints": "optional per-WC override"
+          },
+          {
+            "name": "deduct_openings",
+            "type": "bool",
+            "constraints": "default True"
+          },
+          {
+            "name": "opening_threshold_sf",
+            "type": "Decimal",
+            "constraints": "default 20; openings below are not deducted but are itemised as skipped"
+          },
+          {
+            "name": "trim_allowance_in",
+            "type": "Decimal",
+            "constraints": "added to wall height before repeat rounding in the strip method"
+          }
+        ]
+      },
+      {
+        "entity": "TraceRecord",
+        "owned_by": "TraceLedger",
+        "fields": [
+          {
+            "name": "value_id",
+            "type": "ValueId",
+            "constraints": "primary key; every displayed computed number has one"
+          },
+          {
+            "name": "formula",
+            "type": "str",
+            "constraints": "the expression applied, as displayed"
+          },
+          {
+            "name": "inputs",
+            "type": "Mapping[str, Decimal]",
+            "constraints": "named input values consumed"
+          },
+          {
+            "name": "sources",
+            "type": "list[SourceRef]",
+            "constraints": "sheet plus read method for each input"
+          }
+        ]
+      },
+      {
+        "entity": "Proposal",
+        "owned_by": "ExtractionPort",
+        "fields": [
+          {
+            "name": "field_ref",
+            "type": "FieldRef",
+            "constraints": "the field this proposes a value for"
+          },
+          {
+            "name": "value",
+            "type": "object",
+            "constraints": "provisional until confirmed"
+          },
+          {
+            "name": "source_sheet_id",
+            "type": "SheetId",
+            "constraints": "required"
+          },
+          {
+            "name": "confidence",
+            "type": "Decimal",
+            "constraints": "0 to 1; low confidence auto-routes to the review queue"
+          },
+          {
+            "name": "confirmed",
+            "type": "bool",
+            "constraints": "defaults False; only True may enter the compute path"
+          }
+        ]
+      }
+    ],
+    "technology_choices": [
+      {
+        "concern": "Language and runtime",
+        "choice": "CPython",
+        "version": "3.12.7",
+        "requirement_ids": [
+          "NFR-2",
+          "NFR-3"
+        ],
+        "rationale": "Matches the stated target stack. Chosen for its stable Decimal module and typing support, both load-bearing for deterministic money-free but exact arithmetic and for the frozen interface signatures."
+      },
+      {
+        "concern": "Desktop UI toolkit",
+        "choice": "PySide6 (Qt for Python, LGPL)",
+        "version": "6.7.2",
+        "requirement_ids": [
+          "FR-1",
+          "FR-7",
+          "NFR-1"
+        ],
+        "rationale": "Provides the zoomable graphics view needed for sheet display, table and tree widgets for the per-WC drill-down, and a docked review queue panel, in a single cross-platform desktop runtime with no browser or server component."
+      },
+      {
+        "concern": "Exact decimal arithmetic",
+        "choice": "Python standard library decimal module",
+        "version": "3.12.7",
+        "requirement_ids": [
+          "FR-4",
+          "FR-5",
+          "FR-6",
+          "NFR-2"
+        ],
+        "rationale": "Binary floating point makes ceil-based drop and roll counts non-reproducible at boundary values. Decimal with an explicit context gives the bit-identical repeat rounding and round-up-to-sale-unit behaviour NFR-2 requires."
+      },
+      {
+        "concern": "Domain model definition and validation",
+        "choice": "Pydantic",
+        "version": "2.8.2",
+        "requirement_ids": [
+          "FR-2",
+          "FR-8",
+          "NFR-4"
+        ],
+        "rationale": "Lets the SET READ versus COMPUTED distinction and the UNKNOWN sentinel be encoded as validated types rather than convention, so an unconfirmed or unknown value cannot be silently passed where a confirmed Decimal is required."
+      },
+      {
+        "concern": "Local project persistence",
+        "choice": "SQLite (via the stdlib sqlite3 driver)",
+        "version": "3.45.3",
+        "requirement_ids": [
+          "NFR-2",
+          "NFR-3"
+        ],
+        "rationale": "A single-file, zero-configuration, offline store that makes a project portable and reload-identical, with no server process to run or defend."
+      },
+      {
+        "concern": "PNG decoding and thumbnails",
+        "choice": "Pillow",
+        "version": "10.4.0",
+        "requirement_ids": [
+          "FR-1"
+        ],
+        "rationale": "Validates that an ingested file is a genuinely readable PNG (AC-1.2) and generates the ingest thumbnails (AC-1.1)."
+      },
+      {
+        "concern": "Spreadsheet export",
+        "choice": "openpyxl",
+        "version": "3.1.5",
+        "requirement_ids": [
+          "FR-7"
+        ],
+        "rationale": "Writes the orderable takeoff workbook with raw and with-waste columns preserved side by side."
+      },
+      {
+        "concern": "Printable summary export",
+        "choice": "ReportLab",
+        "version": "4.2.2",
+        "requirement_ids": [
+          "FR-7"
+        ],
+        "rationale": "Generates the printable per-WC summary including the set-read reference block and policy summary, offline."
+      },
+      {
+        "concern": "Test framework designated for the downstream test stage",
+        "choice": "pytest",
+        "version": "8.3.2",
+        "requirement_ids": [
+          "FR-5",
+          "NFR-2"
+        ],
+        "rationale": "Named here only so the test stage targets a fixed framework against the frozen signatures; no test code is authored at this stage."
+      },
+      {
+        "concern": "Desktop packaging",
+        "choice": "PyInstaller",
+        "version": "6.10.0",
+        "requirement_ids": [
+          "NFR-3"
+        ],
+        "rationale": "Produces the self-contained offline desktop artifact with the Qt runtime bundled, so no install-time network access is needed."
+      },
+      {
+        "concern": "Optional vision pre-fill client (v1.1, opt-in, out of the v1 offline path)",
+        "choice": "anthropic Python SDK",
+        "version": "0.34.2",
+        "requirement_ids": [
+          "NFR-3",
+          "NFR-4"
+        ],
+        "rationale": "Isolated entirely behind ExtractionPort and never imported by the core or math modules, so the v1 build has no network client on any code path and the opt-in nature of the network call stays structurally verifiable."
+      }
+    ],
+    "adrs": [
+      {
+        "id": "ADR-001",
+        "title": "Single-process layered desktop monolith with a pure core",
+        "status": "ACCEPTED",
+        "context": "The tool serves one estimator working one drawing set per run with no distribution requirement, but must support an interactive edit-and-recompute loop, an on-screen drill-down and a live review queue. A localhost service split and a headless CLI pipeline were both evaluated.",
+        "decision": "Build one desktop process in layers: DesktopShell (Qt) over TakeoffPresenter over the domain services, with TakeoffEngine as a pure I/O-free core and ProjectRepository as the only persistence boundary. No local HTTP service, no separate deployable.",
+        "consequences": "Positive: no serialization hop inside the recompute loop, one artifact to package and debug, offline by construction, and layer boundaries that a review bot can check by inspecting imports. Negative: no multi-user or web path without later introducing a transport boundary; the math core is reachable only from Python without an added interop layer; layer separation depends on import discipline rather than process isolation.",
+        "requirement_ids": [
+          "FR-7",
+          "NFR-1",
+          "NFR-2",
+          "NFR-3"
+        ]
+      },
+      {
+        "id": "ADR-002",
+        "title": "Set-read and compute are separate modules with a one-way dependency",
+        "status": "ACCEPTED",
+        "context": "The requirement source draws a hard line: schedule-sourced values are read verbatim and never derived, while quantities are computed. Enforced only by convention, this line erodes the moment a convenience helper back-fills a missing roll width or normalises a repeat.",
+        "decision": "Place set-read state in SetReadRegistry, which exposes storage and retrieval and no arithmetic at all, and place all arithmetic in TakeoffEngine, GeometryService and AggregationService, which consume WCDefinition as immutable constants. The dependency runs one way, compute imports set-read and never the reverse, and any absent schedule field is an explicit UNKNOWN sentinel rather than a default or an imputed value.",
+        "consequences": "Positive: the boundary becomes mechanically checkable, an UNKNOWN cannot be arithmetically consumed, and provenance stays intact for NFR-1. Negative: more ceremony around every schedule field, and callers must handle UNKNOWN explicitly at each use site rather than relying on a default.",
+        "requirement_ids": [
+          "FR-2",
+          "FR-5",
+          "FR-8",
+          "NFR-1"
+        ]
+      },
+      {
+        "id": "ADR-003",
+        "title": "Deterministic exact arithmetic via Decimal in a pure math core",
+        "status": "ACCEPTED",
+        "context": "The quantity math is dominated by ceil operations at boundaries (drops, repeat-rounded cut length, rolls). Binary floating point can place a boundary value on either side of an integer step, so the same inputs could yield a different roll count across runs or machines, breaking NFR-2.",
+        "decision": "TakeoffEngine is a pure module with no I/O, no clock, no randomness and no global state, operating on Decimal under an explicitly set context. All rounding to a sale unit is round-up, intermediate areas are never rounded down, and raw and with-waste figures are both retained rather than one being derived for display.",
+        "consequences": "Positive: byte-identical results across runs and platforms, and the core is trivially testable in isolation by the downstream test stage. Negative: Decimal is slower than float and every call site must avoid accidental float coercion, which becomes a standing review check.",
+        "requirement_ids": [
+          "FR-5",
+          "FR-6",
+          "NFR-2"
+        ]
+      },
+      {
+        "id": "ADR-004",
+        "title": "All reading enters through a pluggable ExtractionPort; manual entry is the v1 adapter",
+        "status": "ACCEPTED",
+        "context": "The source recommends shipping manual entry first for trustworthiness and layering vision pre-fill later, without letting an unconfirmed machine-read number reach an order. Wiring a reader directly into the domain would make that later addition a rewrite and would place a non-deterministic component on the compute path.",
+        "decision": "Define ExtractionPort as the single boundary for tags, dimensions and schedule fields. Every adapter returns Proposal objects carrying source, confidence and confirmed=False. ManualEntryAdapter is the only v1 implementation; VisionPrefillAdapter is deferred to v1.1, is opt-in, and neither adapter may import or invoke TakeoffEngine.",
+        "consequences": "Positive: v1 is fully offline and deterministic, adding vision or an OCR adapter for the schedule table changes no domain, math, review or export code, and the guarantee that a reader cannot compute is structural. Negative: an extra indirection even for manual entry, and every read value carries provenance metadata the manual path barely needs.",
+        "requirement_ids": [
+          "FR-3",
+          "FR-4",
+          "NFR-3",
+          "NFR-4"
+        ]
+      },
+      {
+        "id": "ADR-005",
+        "title": "Flag rather than guess, with blocking flags gating computation",
+        "status": "ACCEPTED",
+        "context": "Missing ceiling heights, undefined WC tags, unresolved blanket-note overrides, unknown match types and plan-versus-elevation conflicts are all normal conditions in a real set. Substituting a plausible default would produce a confident, wrong order quantity that no downstream check could detect.",
+        "decision": "FlagRegistry owns a review queue; any missing, ambiguous or contradictory input raises a typed Flag recording its source sheet and what it blocks. TakeoffEngine consults blocking_flags_for before computing, and a TakeoffLine with a non-empty blocked_by emits no quantity at all rather than a partial or estimated one.",
+        "consequences": "Positive: no fabricated quantity can reach an order line, and every gap is visible with its provenance. Negative: an incomplete set yields an incomplete takeoff, which is correct but places real review burden on the estimator before numbers appear.",
+        "requirement_ids": [
+          "FR-8",
+          "FR-2",
+          "FR-3",
+          "FR-4"
+        ]
+      },
+      {
+        "id": "ADR-006",
+        "title": "Waste is applied exactly once, structurally separate from repeat loss",
+        "status": "ACCEPTED",
+        "context": "Pattern-repeat loss and waste percentage cover different things, and folding repeat loss into the waste percentage inflates every order. The source calls this out explicitly and requires that setting waste to zero still leaves the repeat-driven quantity intact.",
+        "decision": "The strip method computes repeat loss inside cut_length via ceil((height + trim)/repeat) * repeat and reports raw_qty with that loss already included and no waste. Waste is applied once afterwards, at a single call site, producing with_waste_qty. No function accepts an already-wasted quantity and applies waste again, and raw and with-waste values are carried side by side to the presentation layer.",
+        "consequences": "Positive: AC-5.4 is verifiable by toggling waste to zero and observing the repeat-driven quantity survive, and double-counting is prevented by the shape of the data rather than by care. Negative: two quantity fields must be threaded through aggregation, export and display instead of one.",
+        "requirement_ids": [
+          "FR-5",
+          "FR-6"
+        ]
+      },
+      {
+        "id": "ADR-007",
+        "title": "Per-WC unit fidelity with no cross-unit conversion path",
+        "status": "ACCEPTED",
+        "context": "Commercial goods sell by the linear yard off a bolt and residential goods by the roll, and a single set can mix both. Any generic conversion helper invites an aggregate view that blends incompatible units into a meaningless total.",
+        "decision": "UnitOfSale is read per WC from that WC's own schedule row and travels with QuantityResult and TakeoffLine. The codebase exposes no linear-yard-to-roll conversion function, and the aggregate view lists each WC in its own unit with no combined total.",
+        "consequences": "Positive: AC-5.3 holds by construction and a mixed-unit set cannot produce a blended figure. Negative: there is no single scalar summarising the whole order, which some users may expect.",
+        "requirement_ids": [
+          "FR-2",
+          "FR-5",
+          "FR-6"
+        ]
+      },
+      {
+        "id": "ADR-008",
+        "title": "Rooms model an explicit wall set; wall-level tags override room-level defaults",
+        "status": "ACCEPTED",
+        "context": "Blanket notes such as ALL WALLS: WC-1 combined with per-wall exceptions are the normal way finishes are documented, and a back-wall accent may appear with no blanket note at all. Resolving this by text interpretation alone is ambiguous.",
+        "decision": "Model each Room as an explicit set of Wall records. A room-level blanket note sets a default across that set, a wall-level tag replaces the default for that wall only, and each Application records its origin as ROOM_BLANKET, WALL_OVERRIDE or ELEVATION_TAG. Any room whose resolution is ambiguous raises UNRESOLVED_UNO and is not guessed.",
+        "consequences": "Positive: AC-3.1 and AC-3.2 fall out of the model directly, and origin provenance makes conflicts explainable. Negative: the wall set must be established for every room before applications can resolve, which adds entry work for rooms with a single tagged wall.",
+        "requirement_ids": [
+          "FR-3",
+          "FR-8"
+        ]
+      },
+      {
+        "id": "ADR-009",
+        "title": "Wall identity is (room_id, wall_id) and drives cross-sheet de-duplication",
+        "status": "ACCEPTED",
+        "context": "The same physical wall commonly appears on both the finish plan and an elevation. Counting it from each sheet double-counts the material, while dropping one sheet loses the partial-height and opening information the elevation carries.",
+        "decision": "Give every wall a stable identity of (room_id, wall_id) and merge all sheet observations onto it: width is taken from the finish plan, applied height from the elevation when it differs from ceiling height, and openings from whichever sheet documents them. Aggregation de-duplicates on this identity, and a width disagreement between plan and elevation raises CONFLICT rather than picking a winner.",
+        "consequences": "Positive: AC-6.2 is satisfied structurally and elevation-only information is preserved. Negative: matching an elevation to the correct wall becomes a required resolution step, and unmatched elevations must be flagged rather than silently ignored.",
+        "requirement_ids": [
+          "FR-6",
+          "FR-4",
+          "FR-8"
+        ]
+      },
+      {
+        "id": "ADR-010",
+        "title": "Takeoff policy is explicit configuration captured as a snapshot per result",
+        "status": "ACCEPTED",
+        "context": "Opening-deduction practice, its size threshold, waste percentage and trim allowance all vary by estimator and by job. Hard-coding them makes results unexplainable and non-reproducible once a default changes.",
+        "decision": "PolicyStore holds waste percentage with optional per-WC override, the opening-deduction toggle and its area threshold, and the trim allowance. Every QuantityResult records the PolicySnapshot it was computed under, and the presentation and export layers display that snapshot alongside the numbers.",
+        "consequences": "Positive: NFR-2 holds across default changes because a result names its own settings, and the policy summary required by the output design is available directly. Negative: policy must be threaded into geometry and quantity calls rather than read from a module-level constant.",
+        "requirement_ids": [
+          "FR-4",
+          "FR-5",
+          "NFR-1",
+          "NFR-2"
+        ]
+      },
+      {
+        "id": "ADR-011",
+        "title": "Machine-read values are provisional until confirmed, enforced by a finalisation gate",
+        "status": "ACCEPTED",
+        "context": "The source is explicit that no auto-read value is final until the estimator confirms it, and that the app assists rather than autonomously producing an order. A vision adapter can return a plausible but wrong dimension, which is undetectable downstream once it becomes a number.",
+        "decision": "Proposals carry confirmed=False by default and only a ConfirmedValue may enter TakeoffEngine. ConfirmationGate exposes is_takeoff_finalisable, which reports every unconfirmed field and every blocking flag, and ExportService refuses to emit a final takeoff while either list is non-empty.",
+        "consequences": "Positive: NFR-4 is enforced at a single checkable choke point rather than distributed across the UI, and the manual v1 path satisfies it trivially since entry is confirmation. Negative: the vision pre-fill delivers less time saving than full automation, which is the intended trade.",
+        "requirement_ids": [
+          "NFR-4",
+          "FR-7",
+          "FR-8"
+        ]
+      },
+      {
+        "id": "ADR-012",
+        "title": "Every computed number is registered in a trace ledger",
+        "status": "ACCEPTED",
+        "context": "NFR-1 forbids black-box totals and requires each displayed number to be traceable to its formula and source dimensions, and the output design requires drill-down from an order line to per-wall drop math.",
+        "decision": "GeometryService, TakeoffEngine and AggregationService each register a TraceRecord for every value they produce, carrying the formula as displayed, the named inputs consumed and a source reference per input. The presentation layer resolves any displayed value through explain_value, and a displayed value that cannot be resolved is treated as a defect rather than rendered bare.",
+        "consequences": "Positive: AC-7.1 and AC-7.2 are served by one mechanism, and review bots can assert that every rendered figure resolves. Negative: computation carries a bookkeeping cost and the ledger must be invalidated and rebuilt on every edit-triggered recompute.",
+        "requirement_ids": [
+          "NFR-1",
+          "FR-7"
+        ]
+      }
+    ],
+    "downstream_contract": {
+      "module_boundaries": [
+        {
+          "module": "wctakeoff.domain",
+          "owns": [
+            "SetReadRegistry"
+          ],
+          "public_interfaces": [
+            "UpsertWCDefinition",
+            "GetWCDefinition"
+          ],
+          "in_scope": [
+            "src/wctakeoff/domain/models.py",
+            "src/wctakeoff/domain/wc_definition.py",
+            "src/wctakeoff/domain/units.py",
+            "src/wctakeoff/domain/ids.py"
+          ]
+        },
+        {
+          "module": "wctakeoff.math",
+          "owns": [
+            "TakeoffEngine"
+          ],
+          "public_interfaces": [
+            "SelectTakeoffMethod",
+            "ComputeQuantityStrip",
+            "ComputeQuantityArea"
+          ],
+          "in_scope": [
+            "src/wctakeoff/math/engine.py",
+            "src/wctakeoff/math/methods.py",
+            "src/wctakeoff/math/rounding.py"
+          ]
+        },
+        {
+          "module": "wctakeoff.geometry",
+          "owns": [
+            "GeometryService"
+          ],
+          "public_interfaces": [
+            "ComputeWallArea"
+          ],
+          "in_scope": [
+            "src/wctakeoff/geometry/area.py",
+            "src/wctakeoff/geometry/openings.py"
+          ]
+        },
+        {
+          "module": "wctakeoff.resolve",
+          "owns": [
+            "ApplicationResolver"
+          ],
+          "public_interfaces": [
+            "ResolveApplications"
+          ],
+          "in_scope": [
+            "src/wctakeoff/resolve/applications.py",
+            "src/wctakeoff/resolve/overrides.py"
+          ]
+        },
+        {
+          "module": "wctakeoff.aggregate",
+          "owns": [
+            "AggregationService"
+          ],
+          "public_interfaces": [
+            "AggregateByWC"
+          ],
+          "in_scope": [
+            "src/wctakeoff/aggregate/rollup.py",
+            "src/wctakeoff/aggregate/dedupe.py"
+          ]
+        },
+        {
+          "module": "wctakeoff.review",
+          "owns": [
+            "FlagRegistry",
+            "ConfirmationGate"
+          ],
+          "public_interfaces": [
+            "RaiseFlag",
+            "BlockingFlagsFor",
+            "ConfirmValue",
+            "IsTakeoffFinalisable"
+          ],
+          "in_scope": [
+            "src/wctakeoff/review/flags.py",
+            "src/wctakeoff/review/gate.py"
+          ]
+        },
+        {
+          "module": "wctakeoff.extraction",
+          "owns": [
+            "ExtractionPort",
+            "ManualEntryAdapter",
+            "VisionPrefillAdapter"
+          ],
+          "public_interfaces": [
+            "ExtractionAdapter"
+          ],
+          "in_scope": [
+            "src/wctakeoff/extraction/port.py",
+            "src/wctakeoff/extraction/manual.py",
+            "src/wctakeoff/extraction/vision.py"
+          ]
+        },
+        {
+          "module": "wctakeoff.ingest",
+          "owns": [
+            "SheetIngestService"
+          ],
+          "public_interfaces": [
+            "IngestSheets",
+            "AssignSheetRole"
+          ],
+          "in_scope": [
+            "src/wctakeoff/ingest/sheets.py",
+            "src/wctakeoff/ingest/roles.py"
+          ]
+        },
+        {
+          "module": "wctakeoff.policy",
+          "owns": [
+            "PolicyStore"
+          ],
+          "public_interfaces": [
+            "GetPolicySnapshot"
+          ],
+          "in_scope": [
+            "src/wctakeoff/policy/settings.py"
+          ]
+        },
+        {
+          "module": "wctakeoff.trace",
+          "owns": [
+            "TraceLedger"
+          ],
+          "public_interfaces": [
+            "RecordTrace",
+            "ExplainValue"
+          ],
+          "in_scope": [
+            "src/wctakeoff/trace/ledger.py"
+          ]
+        },
+        {
+          "module": "wctakeoff.persistence",
+          "owns": [
+            "ProjectRepository"
+          ],
+          "public_interfaces": [
+            "SaveProject",
+            "LoadProject"
+          ],
+          "in_scope": [
+            "src/wctakeoff/persistence/repository.py",
+            "src/wctakeoff/persistence/schema.sql"
+          ]
+        },
+        {
+          "module": "wctakeoff.presentation",
+          "owns": [
+            "TakeoffPresenter",
+            "ExportService"
+          ],
+          "public_interfaces": [
+            "BuildTakeoffView",
+            "ExportTakeoff"
+          ],
+          "in_scope": [
+            "src/wctakeoff/presentation/presenter.py",
+            "src/wctakeoff/presentation/export_xlsx.py",
+            "src/wctakeoff/presentation/export_pdf.py"
+          ]
+        },
+        {
+          "module": "wctakeoff.ui",
+          "owns": [
+            "DesktopShell"
+          ],
+          "public_interfaces": [],
+          "in_scope": [
+            "src/wctakeoff/ui/main_window.py",
+            "src/wctakeoff/ui/sheet_viewer.py",
+            "src/wctakeoff/ui/entry_forms.py",
+            "src/wctakeoff/ui/review_panel.py",
+            "src/wctakeoff/ui/takeoff_view.py",
+            "src/wctakeoff/ui/policy_panel.py"
+          ]
+        }
+      ],
+      "in_scope": [
+        "src/wctakeoff/**",
+        "pyproject.toml",
+        "src/wctakeoff/persistence/schema.sql",
+        "src/wctakeoff/__main__.py"
+      ],
+      "out_of_scope": [
+        "architecture/** (this stage owns it; implementation bots MUST NOT modify the spec or ADRs)",
+        "requirements/** (owned by requirements-planner-bot)",
+        "pipeline/handoff.schema.json (pipeline contract, not feature code)",
+        "tests/** (owned by test-bot; implementation bots MUST NOT author tests)",
+        ".github/** and any CI configuration (owned by the CI stage)",
+        "Any HTTP server, web framework, ASGI server or listening socket (rejected in OPT-2; violates the no-server stack and NFR-3)",
+        "Any network client imported by wctakeoff.math, wctakeoff.geometry, wctakeoff.aggregate, wctakeoff.domain or wctakeoff.persistence (NFR-3)",
+        "Any pixel-to-real-world scale derivation from PNG geometry as a primary dimension source (ARCH-A2)",
+        "Any linear-yard to roll conversion helper (ADR-007)",
+        "Any default or imputed value for a missing ceiling height, roll width, repeat or match type (ADR-002, ADR-005)",
+        "Metric unit handling and multi-project or cross-project state (ARCH-A9, ARCH-A10)",
+        "Curved, sloped or trapezoidal geometry solvers (ARCH-A11)"
+      ],
+      "interface_signatures": [
+        "IngestSheets",
+        "AssignSheetRole",
+        "UpsertWCDefinition",
+        "GetWCDefinition",
+        "ResolveApplications",
+        "ComputeWallArea",
+        "SelectTakeoffMethod",
+        "ComputeQuantityStrip",
+        "ComputeQuantityArea",
+        "AggregateByWC",
+        "RaiseFlag",
+        "BlockingFlagsFor",
+        "ExtractionAdapter",
+        "ConfirmValue",
+        "IsTakeoffFinalisable",
+        "GetPolicySnapshot",
+        "RecordTrace",
+        "ExplainValue",
+        "BuildTakeoffView",
+        "ExportTakeoff",
+        "SaveProject",
+        "LoadProject"
+      ]
+    },
+    "persistence": {
+      "committed": true,
+      "commit_sha": null,
+      "paths_written": [
+        "architecture/wallcovering-takeoff/architecture_spec.json",
+        "architecture/wallcovering-takeoff/adr/ADR-001.md",
+        "architecture/wallcovering-takeoff/adr/ADR-002.md",
+        "architecture/wallcovering-takeoff/adr/ADR-003.md",
+        "architecture/wallcovering-takeoff/adr/ADR-004.md",
+        "architecture/wallcovering-takeoff/adr/ADR-005.md",
+        "architecture/wallcovering-takeoff/adr/ADR-006.md",
+        "architecture/wallcovering-takeoff/adr/ADR-007.md",
+        "architecture/wallcovering-takeoff/adr/ADR-008.md",
+        "architecture/wallcovering-takeoff/adr/ADR-009.md",
+        "architecture/wallcovering-takeoff/adr/ADR-010.md",
+        "architecture/wallcovering-takeoff/adr/ADR-011.md",
+        "architecture/wallcovering-takeoff/adr/ADR-012.md",
+        "INDEX.md"
+      ],
+      "index_updated": true
+    },
+    "self_verification": {
+      "schema_valid": true,
+      "requirement_coverage": {
+        "FR-1": {
+          "components": [
+            "SheetIngestService",
+            "DesktopShell"
+          ],
+          "interfaces": [
+            "IngestSheets",
+            "AssignSheetRole"
+          ],
+          "adrs": [
+            "ADR-001"
+          ],
+          "acceptance_criteria": [
+            "AC-1.1 unlabelled sheets flagged via FlagRegistry",
+            "AC-1.2 non-PNG or unreadable rejected into IngestResult.rejected with reason"
+          ]
+        },
+        "FR-2": {
+          "components": [
+            "SetReadRegistry",
+            "ManualEntryAdapter"
+          ],
+          "interfaces": [
+            "UpsertWCDefinition",
+            "GetWCDefinition"
+          ],
+          "adrs": [
+            "ADR-002",
+            "ADR-007"
+          ],
+          "acceptance_criteria": [
+            "AC-2.1 verbatim storage, no recomputation, SetReadRegistry exposes no arithmetic",
+            "AC-2.2 absent field stored as UNKNOWN sentinel and raises UNKNOWN_SCHEDULE_FIELD which blocks that WC"
+          ]
+        },
+        "FR-3": {
+          "components": [
+            "ApplicationResolver",
+            "ExtractionPort"
+          ],
+          "interfaces": [
+            "ResolveApplications"
+          ],
+          "adrs": [
+            "ADR-008",
+            "ADR-004"
+          ],
+          "acceptance_criteria": [
+            "AC-3.1 room blanket note applies across the room wall set",
+            "AC-3.2 wall-level tag overrides room default, origin recorded as WALL_OVERRIDE",
+            "AC-3.3 undeterminable target returns into ApplicationResolution.ambiguous, never guessed"
+          ]
+        },
+        "FR-4": {
+          "components": [
+            "GeometryService",
+            "PolicyStore"
+          ],
+          "interfaces": [
+            "ComputeWallArea",
+            "GetPolicySnapshot"
+          ],
+          "adrs": [
+            "ADR-010",
+            "ADR-005",
+            "ADR-009"
+          ],
+          "acceptance_criteria": [
+            "AC-4.1 gross area from width times applied height",
+            "AC-4.2 threshold-driven deduction with deducted and skipped both itemised",
+            "AC-4.3 missing ceiling height raises MissingHeightError and MISSING_HEIGHT flag with no default assumed"
+          ]
+        },
+        "FR-5": {
+          "components": [
+            "TakeoffEngine"
+          ],
+          "interfaces": [
+            "SelectTakeoffMethod",
+            "ComputeQuantityStrip",
+            "ComputeQuantityArea"
+          ],
+          "adrs": [
+            "ADR-003",
+            "ADR-006",
+            "ADR-007"
+          ],
+          "acceptance_criteria": [
+            "AC-5.1 strip method drops, repeat-rounded cut length, raw and with-waste retained distinctly",
+            "AC-5.2 area method net_sy, waste, ceil to units",
+            "AC-5.3 UnitOfSale travels with the result and no conversion function exists",
+            "AC-5.4 repeat loss inside cut_length, waste applied once at a single call site"
+          ]
+        },
+        "FR-6": {
+          "components": [
+            "AggregationService"
+          ],
+          "interfaces": [
+            "AggregateByWC"
+          ],
+          "adrs": [
+            "ADR-006",
+            "ADR-007",
+            "ADR-009"
+          ],
+          "acceptance_criteria": [
+            "AC-6.1 raw and with-waste both shown on the order line, order_qty rounded up to the sale unit",
+            "AC-6.2 de-duplication on (room_id, wall_id) identity"
+          ]
+        },
+        "FR-7": {
+          "components": [
+            "TakeoffPresenter",
+            "ExportService",
+            "DesktopShell"
+          ],
+          "interfaces": [
+            "BuildTakeoffView",
+            "ExportTakeoff",
+            "ExplainValue"
+          ],
+          "adrs": [
+            "ADR-012",
+            "ADR-001",
+            "ADR-011"
+          ],
+          "acceptance_criteria": [
+            "AC-7.1 drill-down to contributing rooms, walls, dimensions, drop math, waste and final qty",
+            "AC-7.2 per-value source shown, value editable, recompute on edit via the step 15 loop"
+          ]
+        },
+        "FR-8": {
+          "components": [
+            "FlagRegistry",
+            "ConfirmationGate"
+          ],
+          "interfaces": [
+            "RaiseFlag",
+            "BlockingFlagsFor",
+            "IsTakeoffFinalisable"
+          ],
+          "adrs": [
+            "ADR-005",
+            "ADR-011"
+          ],
+          "acceptance_criteria": [
+            "AC-8.1 UNDEFINED_WC reported as defined-but-missing with no fabricated quantity",
+            "AC-8.2 plan versus elevation disagreement raises CONFLICT and is not auto-resolved"
+          ]
+        },
+        "NFR-1": {
+          "components": [
+            "TraceLedger",
+            "TakeoffPresenter"
+          ],
+          "interfaces": [
+            "RecordTrace",
+            "ExplainValue"
+          ],
+          "adrs": [
+            "ADR-012",
+            "ADR-002"
+          ],
+          "acceptance_criteria": [
+            "Every displayed computed number resolves through explain_value to formula, inputs and source sheet"
+          ]
+        },
+        "NFR-2": {
+          "components": [
+            "TakeoffEngine",
+            "ProjectRepository",
+            "PolicyStore"
+          ],
+          "interfaces": [
+            "LoadProject",
+            "GetPolicySnapshot"
+          ],
+          "adrs": [
+            "ADR-003",
+            "ADR-010"
+          ],
+          "acceptance_criteria": [
+            "Pure I/O-free core, Decimal under an explicit context, policy snapshot recorded per result, reload plus recompute reproduces identical figures"
+          ]
+        },
+        "NFR-3": {
+          "components": [
+            "ManualEntryAdapter",
+            "ExtractionPort",
+            "ProjectRepository"
+          ],
+          "interfaces": [
+            "ExtractionAdapter"
+          ],
+          "adrs": [
+            "ADR-004",
+            "ADR-001"
+          ],
+          "acceptance_criteria": [
+            "v1 core path has no network client; the only network-capable component is the opt-in VisionPrefillAdapter behind ExtractionPort, and core modules are barred from importing a network client by the out_of_scope list"
+          ]
+        },
+        "NFR-4": {
+          "components": [
+            "ConfirmationGate",
+            "ExtractionPort"
+          ],
+          "interfaces": [
+            "ConfirmValue",
+            "IsTakeoffFinalisable"
+          ],
+          "adrs": [
+            "ADR-011",
+            "ADR-004"
+          ],
+          "acceptance_criteria": [
+            "Proposal.confirmed defaults False, only ConfirmedValue enters TakeoffEngine, export refuses while unconfirmed values or blocking flags remain"
+          ]
+        }
+      },
+      "unsatisfiable": [],
+      "scope_check": "PASS. No implementation code, no test code and no CI configuration were emitted. Interface signatures, type declarations, formulas restated from the requirement source, and schema/field definitions only; no function bodies.",
+      "version_check": "PASS. All 11 technology_choices carry an exactly pinned version with no ranges and no use of latest. The approved technology universe was supplied as an unresolved template variable, so per ARCH-A1 the set was derived from the requirement source's stated target stack (Python, local desktop UI, no server, no website) and NFR-3; ARCH-A1 is the designated substitution point if the orchestrator maintains a different approved list.",
+      "constraints_check": "Constraint values were supplied to this stage as unresolved template variables. Effective constraints were taken from the requirement source: scale is one drawing set for one estimator per run (source A3), latency is an interactive edit-to-recompute loop (AC-7.2), cost is zero infrastructure with no per-call spend on the v1 path, team_size is small single-team, existing_stack is Python with a local desktop UI and no server, and compliance is offline core operation with drawing sets never leaving the machine (NFR-3). Every option in options_considered was mapped against all six.",
+      "id_uniqueness": "PASS. 12 ADR ids ADR-001 through ADR-012 unique; 17 component names unique; 22 interface names unique and each appears in downstream_contract.interface_signatures; 11 assumption ids ARCH-A1 through ARCH-A11 unique; 3 option ids OPT-1 through OPT-3 unique.",
+      "handoff_consistency": "PASS. Every requirement id referenced (FR-1 through FR-8, NFR-1 through NFR-4) exists in the requirement source; no requirement was invented. Every component, interface and technology choice traces to at least one requirement id. Every module in downstream_contract.module_boundaries owns at least one declared component, and every declared component is owned by exactly one module.",
+      "schema_validation": "Validated against https://raw.githubusercontent.com/deigedvalo-netizen/claudeskills/main/pipeline/handoff.schema.json using a Draft 2020-12 validator prior to emission and prior to persistence.",
+      "persistence_check": "Written to architecture/wallcovering-takeoff/ with one file per ADR under adr/, plus a new INDEX.md row. commit_sha is null inside the persisted document because a file cannot contain the hash of the commit that creates it; the authoritative sha is reported in the emitted handoff.",
+      "source_deviation_note": "The contracted input path requirements/wallcovering-takeoff/handoff.json does not exist in the repository. On explicit orchestrator instruction, requirements/wallcovering-takeoff/plan.md was used as the requirements source. It is markdown rather than a schema-valid requirements_artifact, but it does carry stable requirement ids (FR-1 through FR-8, NFR-1 through NFR-4) with Given/When/Then acceptance criteria (AC-n.n), so traceability is preserved. Open questions Q1 through Q7 in that source were not left unresolved: each carries an explicit recommendation from the planner, and each has been adopted verbatim as a numbered assumption (ARCH-A2 through ARCH-A8) rather than silently defaulted. Recommend the planner stage backfill a conforming handoff.json so future stages validate against the schema at the boundary."
+    }
+  }
+}
