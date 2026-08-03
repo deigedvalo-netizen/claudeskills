@@ -1,0 +1,39 @@
+# wallcovering-takeoff — implementation stage packaging.
+# Requirement ids: NFR-2, NFR-3 (technology_choices: all versions pinned
+# exactly; no ranges, no 'latest'). The core install is fully offline-capable
+# once packaged (PyInstaller 6.10.0 per technology_choices produces the
+# distributable; it is a build-time tool, not a runtime dependency).
+#
+# The optional 'vision' extra isolates the v1.1 opt-in network client
+# (ADR-004): a default install carries no network client on any code path.
+
+[build-system]
+requires = ["setuptools==75.1.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wctakeoff"
+version = "1.0.0"
+description = "Single-user offline wallcovering takeoff desktop application (feature: wallcovering-takeoff)"
+requires-python = "==3.12.*"  # CPython 3.12.7 per technology_choices
+dependencies = [
+    "PySide6==6.7.2",
+    "pydantic==2.8.2",
+    "Pillow==10.4.0",
+    "openpyxl==3.1.5",
+    "reportlab==4.2.2",
+]
+
+[project.optional-dependencies]
+# v1.1 opt-in vision pre-fill ONLY (NFR-3): never installed by default.
+vision = ["anthropic==0.34.2"]
+
+[project.gui-scripts]
+wctakeoff = "wctakeoff.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["wctakeoff*"]
+
+[tool.setuptools.package-data]
+"wctakeoff.persistence" = ["schema.sql"]
