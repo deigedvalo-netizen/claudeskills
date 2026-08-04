@@ -11,11 +11,13 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -29,6 +31,11 @@ from wctakeoff.extraction.manual import ManualEntryAdapter
 
 class WCDefinitionForm(QWidget):
     """Verbatim schedule-row entry for one WC tag (FR-2, SET READ)."""
+
+    #: Emitted after entered values have been queued on the adapter, so the
+    #: shell can project them into the set-read registry and recompute
+    #: (FR-2, AC-7.2 recompute loop).
+    submitted = Signal()
 
     def __init__(self, adapter: ManualEntryAdapter) -> None:
         super().__init__()
@@ -84,6 +91,16 @@ class WCDefinitionForm(QWidget):
 
     def _on_submit(self) -> None:
         if self._current_sheet is None:
+            QMessageBox.warning(
+                self,
+                "No sheet selected",
+                (
+                    "Every value is recorded against the sheet it was read "
+                    "from (NFR-1). Import sheets from the File menu, then "
+                    "double-click one in the Drawing Set panel before "
+                    "entering schedule fields."
+                ),
+            )
             return
         wc_tag = self.tag_box.currentText()
         subject = SubjectRef(kind="wc_definition", ref_id=wc_tag)
@@ -106,10 +123,14 @@ class WCDefinitionForm(QWidget):
                 FieldRef(subject=subject, field_name=field_name),
                 value,
             )
+        self.submitted.emit()
 
 
 class DimensionForm(QWidget):
     """Wall dimension and opening entry against the displayed sheet (FR-4)."""
+
+    #: Emitted after entered values have been queued on the adapter (FR-4).
+    submitted = Signal()
 
     def __init__(self, adapter: ManualEntryAdapter) -> None:
         super().__init__()
@@ -139,10 +160,28 @@ class DimensionForm(QWidget):
 
     def _on_submit(self) -> None:
         if self._current_sheet is None:
+            QMessageBox.warning(
+                self,
+                "No sheet selected",
+                (
+                    "Dimensions are recorded against the sheet they were "
+                    "read from (NFR-1). Import sheets from the File menu, "
+                    "then double-click one in the Drawing Set panel before "
+                    "entering dimensions."
+                ),
+            )
             return
         room = self.room_number.text().strip()
         wall = self.wall_designation.text().strip()
         if not room or not wall:
+            QMessageBox.warning(
+                self,
+                "Room and wall required",
+                (
+                    "A wall is identified by (room, wall) (ADR-009); both "
+                    "must be entered before dimensions can be recorded."
+                ),
+            )
             return
         subject = SubjectRef(kind="wall", ref_id=f"{room}/{wall}")
         for field_name, widget in (
@@ -168,3 +207,4 @@ class DimensionForm(QWidget):
                 FieldRef(subject=subject, field_name="wc_tag"),
                 tag,
             )
+        self.submitted.emit()

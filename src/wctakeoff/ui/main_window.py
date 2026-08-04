@@ -10,6 +10,7 @@ Contains no takeoff arithmetic (ADR-001 layering).
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -54,6 +55,7 @@ class DesktopShell(QMainWindow):
         flags: FlagRegistry,
         gate: ConfirmationGate,
         export_service: ExportService,
+        on_entry_committed: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self._set_id = set_id
@@ -61,6 +63,10 @@ class DesktopShell(QMainWindow):
         self._presenter = presenter
         self._gate = gate
         self._export_service = export_service
+        # Projection hook supplied by the composition root: turns queued
+        # adapter proposals into registry/repository state before the read
+        # model is rebuilt (ADR-004 step 3 of the data flow).
+        self._on_entry_committed = on_entry_committed
 
         self.setWindowTitle("Wallcovering Takeoff")
         self.resize(1400, 900)
@@ -69,6 +75,8 @@ class DesktopShell(QMainWindow):
         self._viewer = SheetViewer()
         self._wc_form = WCDefinitionForm(adapter)
         self._dim_form = DimensionForm(adapter)
+        self._wc_form.submitted.connect(self._on_entry_submitted)
+        self._dim_form.submitted.connect(self._on_entry_submitted)
         self._takeoff_widget = TakeoffViewWidget()
         tabs = QTabWidget()
         tabs.addTab(self._viewer, "Sheets")
@@ -147,6 +155,19 @@ class DesktopShell(QMainWindow):
         self._viewer.show_sheet(sheet)
         self._wc_form.set_current_sheet(sheet_id)
         self._dim_form.set_current_sheet(sheet_id)
+
+    def _on_entry_submitted(self) -> None:
+        """Project newly entered values, then rebuild the read model.
+
+        Entry alone only queues proposals on the extraction adapter; the
+        composition root's hook is what promotes them through the
+        confirmation gate into the set-read registry and the repository
+        (FR-2, FR-3, FR-4, NFR-4). Without it the takeoff view would stay
+        empty no matter what the estimator types.
+        """
+        if self._on_entry_committed is not None:
+            self._on_entry_committed()
+        self.recompute()
 
     def recompute(self) -> None:
         """Rebuild the read-model after any edit (AC-7.2 recompute loop)."""
