@@ -15,17 +15,28 @@ from typing import Sequence
 
 from wctakeoff.domain.ids import (
     ApplicationId,
+    OpeningId,
     RoomId,
     SetId,
     SheetId,
     WallId,
     new_set_id,
 )
-from wctakeoff.domain.models import Application, QuantityResult, Room, Wall
+from wctakeoff.domain.models import (
+    Application,
+    Flag,
+    Opening,
+    QuantityResult,
+    Room,
+    SubjectRef,
+    Wall,
+)
 from wctakeoff.domain.units import (
     UNKNOWN,
     ApplicationOrigin,
+    FlagKind,
     MatchType,
+    TakeoffMethod,
     UnitOfSale,
     Unknown,
     V1_WC_TAGS,
@@ -65,6 +76,21 @@ def _opt_dec(values: dict[str, object], name: str) -> Decimal | None:
     return value if isinstance(value, Decimal) else None
 
 
+def _ensure_flag(flags: FlagRegistry, flag: Flag) -> None:
+    """Raise a flag unless an equivalent one is already open.
+
+    Projection re-runs on every entry, so raising unconditionally would
+    fill the review queue with duplicates of the same condition.
+    """
+    for existing in flags.open_flags():
+        if (
+            existing.kind is flag.kind
+            and existing.subject_ref == flag.subject_ref
+        ):
+            return
+    flags.raise_flag(flag)
+
+
 def project_entered_values(
     set_id: SetId,
     ingest: SheetIngestService,
@@ -72,6 +98,7 @@ def project_entered_values(
     gate: ConfirmationGate,
     registry: SetReadRegistry,
     repository: ProjectRepository,
+    flags: FlagRegistry | None = None,
 ) -> None:
     """Promote queued adapter proposals into registry + repository state.
 
@@ -92,6 +119,7 @@ def project_entered_values(
     wc_sheets: dict[str, SheetId] = {}
     wall_values: dict[str, dict[str, object]] = {}
     wall_sheets: dict[str, SheetId] = {}
+    opening_values: dict[str, dict[str, object]] = {}
 
     for sheet in ingest.all_sheets():
         for proposal in adapter.propose(sheet):
@@ -108,6 +136,10 @@ def project_entered_values(
                     proposal.value
                 )
                 wall_sheets[subject.ref_id] = proposal.source_sheet_id
+            elif subject.kind == "opening":
+                opening_values.setdefault(subject.ref_id, {})[field_name] = (
+                    proposal.value
+                )
 
     for wc_tag, values in wc_values.items():
         if wc_tag not in V1_WC_TAGS:
@@ -129,6 +161,23 @@ def project_entered_values(
             )
         )
 
+    openings_by_wall: dict[str, list[Opening]] = {}
+    for ref_id, values in sorted(opening_values.items()):
+        wall_ref, _, _label = ref_id.rpartition("/")
+        width = _opt_dec(values, "width_in")
+        height = _opt_dec(values, "height_in")
+        if not wall_ref or width is None or height is None:
+            continue  # an incomplete opening deducts nothing (ADR-005)
+        kind = values.get("kind")
+        openings_by_wall.setdefault(wall_ref, []).append(
+            Opening(
+                opening_id=OpeningId(ref_id),
+                kind=kind if isinstance(kind, str) and kind else "OTHER",
+                width_in=width,
+                height_in=height,
+            )
+        )
+
     walls_by_room: dict[str, dict[str, Wall]] = {}
     applications: list[Application] = []
     for ref_id, values in wall_values.items():
@@ -137,12 +186,34 @@ def project_entered_values(
             continue
         room_id = RoomId(room_number)
         wall_id = WallId(wall_designation)
+        manual_area = _opt_dec(values, "manual_area_sf")
         walls_by_room.setdefault(room_number, {})[wall_designation] = Wall(
             wall_id=wall_id,
             room_id=room_id,
             width_in=_opt_dec(values, "width_in"),
             applied_height_in=_opt_dec(values, "applied_height_in"),
+            openings=openings_by_wall.get(ref_id, []),
+            manual_area_sf=manual_area,
         )
+        if manual_area is not None and flags is not None:
+            # A traced area bypasses width x height, which is the ARCH-A11
+            # escape hatch for non-rectangular walls; GeometryService
+            # requires the caller to have flagged it as such.
+            _ensure_flag(
+                flags,
+                Flag(
+                    kind=FlagKind.NON_RECTANGULAR,
+                    subject_ref=SubjectRef(kind="wall", ref_id=ref_id),
+                    source_sheet_id=wall_sheets.get(ref_id),
+                    blocks=[],
+                    detail=(
+                        f"wall {ref_id} uses a traced area of {manual_area} "
+                        "sf measured on the drawing instead of width x "
+                        "height; confirm the trace matches the wall "
+                        "(ARCH-A2, ARCH-A11)"
+                    ),
+                ),
+            )
         wall_tag = values.get("wc_tag")
         if isinstance(wall_tag, str) and wall_tag:
             applications.append(
@@ -203,7 +274,7 @@ def main() -> int:
     def commit_entered_values() -> None:
         """Projection hook for the shell (step 3 of the spec data flow)."""
         project_entered_values(
-            set_id, ingest, adapter, gate, registry, repository
+            set_id, ingest, adapter, gate, registry, repository, flags
         )
 
     def results_provider(current_set: SetId) -> Sequence[QuantityResult]:
@@ -224,13 +295,44 @@ def main() -> int:
             if wall is None:
                 continue
             try:
+                method = engine.select_takeoff_method(defn)
+                if method is TakeoffMethod.STRIP and (
+                    wall.width_in is None or wall.applied_height_in is None
+                ):
+                    # The strip method needs real width and height: drops
+                    # come from width and the cut from height, so a traced
+                    # area cannot stand in for them. Substituting zero here
+                    # would emit a silent zero-quantity line, which is
+                    # exactly what ADR-005 forbids.
+                    _ensure_flag(
+                        flags,
+                        Flag(
+                            kind=FlagKind.UNREADABLE_DIMENSION,
+                            subject_ref=SubjectRef(
+                                kind="wall",
+                                ref_id=f"{room.room_number}/{wall.wall_id}",
+                            ),
+                            blocks=[str(app.application_id)],
+                            detail=(
+                                f"{defn.wc_tag} is a patterned strip "
+                                "material, so wall "
+                                f"{room.room_number}/{wall.wall_id} needs "
+                                "both a width and an applied height; a "
+                                "traced area alone cannot determine drops. "
+                                "Measure or type both (FR-4, ADR-005)"
+                            ),
+                        ),
+                    )
+                    continue
                 area = geometry.compute_wall_area(wall, wall.openings, opening)
                 results.append(
                     engine.compute_for_application(
                         app,
                         defn,
-                        wall.width_in or Decimal(0),
-                        wall.applied_height_in or Decimal(0),
+                        wall.width_in if wall.width_in is not None else Decimal(0),
+                        wall.applied_height_in
+                        if wall.applied_height_in is not None
+                        else Decimal(0),
                         area.net_sf,
                         waste,
                     )

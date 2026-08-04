@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
@@ -38,7 +39,7 @@ from wctakeoff.review.gate import ConfirmationGate
 from wctakeoff.ui.entry_forms import DimensionForm, WCDefinitionForm
 from wctakeoff.ui.policy_panel import PolicyPanel
 from wctakeoff.ui.review_panel import ReviewPanel
-from wctakeoff.ui.sheet_viewer import SheetViewer
+from wctakeoff.ui.sheet_viewer import SheetViewer, ViewerMode
 from wctakeoff.ui.takeoff_view import TakeoffViewWidget
 
 
@@ -77,13 +78,17 @@ class DesktopShell(QMainWindow):
         self._dim_form = DimensionForm(adapter)
         self._wc_form.submitted.connect(self._on_entry_submitted)
         self._dim_form.submitted.connect(self._on_entry_submitted)
+        self._viewer.distance_measured.connect(self._on_distance_measured)
+        self._viewer.area_measured.connect(self._on_area_measured)
+        self._viewer.calibrated.connect(self._on_calibrated)
+        self._viewer.status.connect(self._show_status)
         self._takeoff_widget = TakeoffViewWidget()
-        tabs = QTabWidget()
-        tabs.addTab(self._viewer, "Sheets")
-        tabs.addTab(self._wc_form, "Schedule (SET READ)")
-        tabs.addTab(self._dim_form, "Dimensions")
-        tabs.addTab(self._takeoff_widget, "Takeoff")
-        self.setCentralWidget(tabs)
+        self._tabs = QTabWidget()
+        self._tabs.addTab(self._viewer, "Sheets")
+        self._tabs.addTab(self._wc_form, "Schedule (SET READ)")
+        self._tabs.addTab(self._dim_form, "Dimensions")
+        self._tabs.addTab(self._takeoff_widget, "Takeoff")
+        self.setCentralWidget(self._tabs)
 
         # Left dock: sheet list with roles.
         self._sheet_list = QListWidget()
@@ -106,10 +111,61 @@ class DesktopShell(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, policy_dock)
 
         self._build_menu()
+        self._build_tools()
+        self._show_status(
+            "Import a PDF drawing set, double-click a sheet, set the scale, "
+            "then measure."
+        )
+
+    def _build_tools(self) -> None:
+        """Measuring toolbar: pan, calibrate, measure length, measure area."""
+        toolbar = self.addToolBar("Measure")
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        group = QActionGroup(self)
+        group.setExclusive(True)
+
+        self._mode_actions: list[QAction] = []
+        for label, mode, tip in (
+            ("Pan / zoom", ViewerMode.PAN, "Drag to pan, wheel to zoom"),
+            (
+                "Set scale",
+                ViewerMode.CALIBRATE,
+                "Click both ends of a printed dimension, then type its "
+                "length to calibrate this sheet",
+            ),
+            (
+                "Measure length",
+                ViewerMode.DISTANCE,
+                "Click both ends of a wall to measure it",
+            ),
+            (
+                "Measure area",
+                ViewerMode.AREA,
+                "Click each corner, then double-click to close the shape",
+            ),
+        ):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setToolTip(tip)
+            action.triggered.connect(
+                lambda _checked=False, chosen=mode: self._viewer.set_mode(
+                    chosen
+                )
+            )
+            group.addAction(action)
+            toolbar.addAction(action)
+            self._mode_actions.append(action)
+        self._mode_actions[0].setChecked(True)
+
+        toolbar.addSeparator()
+        clear = QAction("Clear measurements", self)
+        clear.setToolTip("Remove drawn measurements; the scale is kept")
+        clear.triggered.connect(self._viewer.clear_measurements)
+        toolbar.addAction(clear)
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
-        import_action = file_menu.addAction("&Import PNG sheets…")
+        import_action = file_menu.addAction("&Import PDF or PNG sheets…")
         import_action.triggered.connect(self._on_import)
         export_xlsx = file_menu.addAction("Export &XLSX…")
         export_xlsx.triggered.connect(
@@ -122,10 +178,15 @@ class DesktopShell(QMainWindow):
 
     def _on_import(self) -> None:
         paths, _selected_filter = QFileDialog.getOpenFileNames(
-            self, "Import PNG sheets", "", "PNG sheets (*.png)"
+            self,
+            "Import drawing sheets",
+            "",
+            "Drawings (*.pdf *.png);;PDF drawing sets (*.pdf);;"
+            "PNG sheets (*.png)",
         )
         if not paths:
             return
+        self._show_status("Rendering sheets…")
         result = self._ingest.ingest_sheets(
             [Path(p) for p in paths], self._set_id
         )
@@ -137,6 +198,10 @@ class DesktopShell(QMainWindow):
             )
         self._refresh_sheet_list()
         self._review_panel.refresh()
+        self._show_status(
+            f"{len(result.accepted)} sheet(s) ready. Double-click one, then "
+            "use Set scale before measuring."
+        )
 
     def _refresh_sheet_list(self) -> None:
         self._sheet_list.clear()
@@ -155,6 +220,37 @@ class DesktopShell(QMainWindow):
         self._viewer.show_sheet(sheet)
         self._wc_form.set_current_sheet(sheet_id)
         self._dim_form.set_current_sheet(sheet_id)
+
+    def _show_status(self, message: str) -> None:
+        """Surface viewer guidance and measurement results to the estimator."""
+        self.statusBar().showMessage(message)
+
+    def _on_calibrated(self, description: str) -> None:
+        """Confirm a newly established sheet scale."""
+        self._show_status(f"Scale set: {description}")
+
+    def _on_distance_measured(self, inches: object) -> None:
+        """Send a measured wall length to the dimension form for confirmation.
+
+        The measurement lands in a field rather than in the takeoff: it is a
+        labelled cross-check the estimator confirms, never a silent dimension
+        source (ARCH-A2, ADR-011).
+        """
+        target = self._dim_form.measure_target.currentText()
+        self._dim_form.apply_measured_length(inches)  # type: ignore[arg-type]
+        self._show_status(
+            f"Measured length sent to “{target}” on the Dimensions tab."
+        )
+
+    def _on_area_measured(self, square_feet: object) -> None:
+        """Send a traced area to the dimension form for confirmation."""
+        self._dim_form.apply_measured_area(
+            square_feet  # type: ignore[arg-type]
+        )
+        self._show_status(
+            "Measured area sent to “Measured wall area” on the Dimensions "
+            "tab."
+        )
 
     def _on_entry_submitted(self) -> None:
         """Project newly entered values, then rebuild the read model.
