@@ -38,7 +38,7 @@ Written by pipeline bots - do not edit by hand.
 
 | feature_id | status | modules | PRs | spec commit consumed | tests / CI | updated |
 |---|---|---|---|---|---|---|
-| wallcovering-takeoff | COMPLETE | 13 of 13 | [#1...#13](https://github.com/deigedvalo-netizen/claudeskills/pulls) (open, unmerged) | `0f420dd` | not authored (owned by test-bot / CI stage) | 2026-08-03 |
+| wallcovering-takeoff | COMPLETE | 13 of 13 | [#1...#13](https://github.com/deigedvalo-netizen/claudeskills/pulls?q=is%3Apr+is%3Amerged) all merged to `main` | `0f420dd` | not authored (owned by test-bot / CI stage) | 2026-08-03 |
 
 ### Module branches - wallcovering-takeoff
 
@@ -62,11 +62,23 @@ All 22 frozen `interface_signatures` implemented exactly once across 49 files. Z
 so no `clarification_request` was raised. Build, typecheck and lint pass on every branch. All 13
 `implementation_manifest` documents validate against `pipeline/handoff.schema.json`.
 
-> **Merge order matters before the test stage.** Every `impl/` branch was cut from `main`, which carries no `src/`
-> tree, so each branch contains only its own module and is not importable in isolation (for example
-> `impl/wallcovering-takeoff/wctakeoff.math` has no `wctakeoff/domain/` package). The 13 branches touch 49 distinct
-> paths with zero overlap, so they merge cleanly in any order - but test-bot must run against merged code, not
-> against a single module branch.
+### Merged tree verification - `main` @ `34a4808`
+
+All 13 PRs merged (merge commits, so each module's head commit above stays resolvable in history).
+The 13 branches touched 49 distinct paths with zero overlap and merged without conflict. Verified after merge:
+
+| check | result |
+|---|---|
+| implementation blobs on `main` | 49 of 49, every blob SHA identical to the branch commits |
+| module packages present | 13 of 13, plus 14 `__init__.py` markers, `schema.sql` and `__main__.py` |
+| non-Qt modules importable | 27 of 27 |
+| NFR-3 offline guarantee | no network client in `sys.modules` after importing the vision adapter |
+| end-to-end pipeline | ingest -> set read -> resolve -> geometry -> quantity -> aggregate -> present -> export -> persist all run |
+| AC-5.4 | waste=0 leaves the repeat-driven quantity intact and `with_waste_qty == raw_qty` |
+| ADR-007 | LINEAR_YARD and ROLL lines stay separate; no combined total emitted |
+| NFR-2 | save -> load -> re-save byte-identical; UNKNOWN sentinel survives the round trip |
+
+The tree on `main` is importable and testable. The test stage can run against it directly.
 
 > **Two files have no module owner.** `pyproject.toml` and `src/wctakeoff/__main__.py` appear in
 > `downstream_contract.in_scope` but in no `module_boundaries[*].in_scope` list; the 13 `__init__.py` package markers
@@ -76,6 +88,7 @@ so no `clarification_request` was raised. Build, typecheck and lint pass on ever
 
 > **Pinned wheels were not installable in the implementation sandbox.** Egress to pypi.org is denied there
 > (HTTP 403 `host_not_allowed`), so PySide6 6.7.2, pydantic 2.8.2, Pillow 10.4.0 and reportlab 4.2.2 were not
-> installed. Every version in `pyproject.toml` matches `technology_choices` exactly and the non-Qt tree was fully
-> typechecked and smoke-tested, but the Qt widgets are syntax- and lint-verified only, not import-verified. The
-> test stage must run in an environment that can install the pinned versions.
+> installed at the pinned versions. Every version in `pyproject.toml` matches `technology_choices` exactly, and the
+> verification above ran against locally available equivalents of those libraries. The Qt widgets in
+> `wctakeoff.ui` are syntax- and lint-verified but NOT import-verified, and are the one part of the tree the checks
+> above do not cover. The test stage must run in an environment that can install the pinned versions.
