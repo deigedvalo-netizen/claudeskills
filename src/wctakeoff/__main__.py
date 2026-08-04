@@ -13,9 +13,24 @@ import sys
 from decimal import Decimal
 from typing import Sequence
 
-from wctakeoff.domain.ids import ApplicationId, SetId, new_set_id
-from wctakeoff.domain.models import Application, QuantityResult
-from wctakeoff.domain.wc_definition import SetReadRegistry
+from wctakeoff.domain.ids import (
+    ApplicationId,
+    RoomId,
+    SetId,
+    SheetId,
+    WallId,
+    new_set_id,
+)
+from wctakeoff.domain.models import Application, QuantityResult, Room, Wall
+from wctakeoff.domain.units import (
+    UNKNOWN,
+    ApplicationOrigin,
+    MatchType,
+    UnitOfSale,
+    Unknown,
+    V1_WC_TAGS,
+)
+from wctakeoff.domain.wc_definition import SetReadRegistry, WCDefinition
 from wctakeoff.aggregate.rollup import AggregationService
 from wctakeoff.extraction.manual import ManualEntryAdapter
 from wctakeoff.geometry.area import GeometryService, MissingHeightError
@@ -28,6 +43,132 @@ from wctakeoff.presentation.presenter import ExportService, TakeoffPresenter
 from wctakeoff.review.flags import FlagRegistry
 from wctakeoff.review.gate import ConfirmationGate
 from wctakeoff.trace.ledger import TraceLedger
+
+
+def _str_field(values: dict[str, object], name: str) -> str | Unknown:
+    value = values.get(name, UNKNOWN)
+    return value if isinstance(value, str) and value else UNKNOWN
+
+
+def _dec_field(values: dict[str, object], name: str) -> Decimal | Unknown:
+    value = values.get(name, UNKNOWN)
+    return value if isinstance(value, Decimal) else UNKNOWN
+
+
+def _match_field(values: dict[str, object], name: str) -> MatchType | Unknown:
+    value = values.get(name, UNKNOWN)
+    return value if isinstance(value, MatchType) else UNKNOWN
+
+
+def _opt_dec(values: dict[str, object], name: str) -> Decimal | None:
+    value = values.get(name)
+    return value if isinstance(value, Decimal) else None
+
+
+def project_entered_values(
+    set_id: SetId,
+    ingest: SheetIngestService,
+    adapter: ManualEntryAdapter,
+    gate: ConfirmationGate,
+    registry: SetReadRegistry,
+    repository: ProjectRepository,
+) -> None:
+    """Promote queued adapter proposals into registry + repository state.
+
+    Requirement ids: FR-2, FR-3, FR-4, NFR-2, NFR-4 (ADR-004, ADR-009,
+    ADR-011).
+
+    This is step 3 of the spec's data flow: ExtractionPort proposals →
+    ConfirmationGate → SetReadRegistry / ProjectRepository. Manual entry is
+    confirmation at source (ADR-011), so every proposal the adapter holds is
+    promoted by the gate on submission. Identities are derived from the
+    estimator-typed room/wall designations rather than minted fresh, so
+    repeated projection is idempotent and recomputation is reload-identical
+    (NFR-2, ADR-009). Nothing is defaulted here: an absent SET READ field
+    stays UNKNOWN and an unreadable dimension stays None, so the flag path
+    still owns them (ADR-002, ADR-005).
+    """
+    wc_values: dict[str, dict[str, object]] = {}
+    wc_sheets: dict[str, SheetId] = {}
+    wall_values: dict[str, dict[str, object]] = {}
+    wall_sheets: dict[str, SheetId] = {}
+
+    for sheet in ingest.all_sheets():
+        for proposal in adapter.propose(sheet):
+            gate.submit_proposal(proposal)
+            subject = proposal.field_ref.subject
+            field_name = proposal.field_ref.field_name
+            if subject.kind == "wc_definition":
+                wc_values.setdefault(subject.ref_id, {})[field_name] = (
+                    proposal.value
+                )
+                wc_sheets[subject.ref_id] = proposal.source_sheet_id
+            elif subject.kind == "wall":
+                wall_values.setdefault(subject.ref_id, {})[field_name] = (
+                    proposal.value
+                )
+                wall_sheets[subject.ref_id] = proposal.source_sheet_id
+
+    for wc_tag, values in wc_values.items():
+        if wc_tag not in V1_WC_TAGS:
+            continue  # out of scope for v1 (ARCH-A9); never invented
+        unit = values.get("unit_of_sale")
+        if not isinstance(unit, UnitOfSale):
+            continue  # unit of sale is read verbatim, never defaulted
+        registry.upsert_wc_definition(
+            WCDefinition(
+                wc_tag=wc_tag,
+                manufacturer=_str_field(values, "manufacturer"),
+                pattern_name=_str_field(values, "pattern_name"),
+                roll_width_in=_dec_field(values, "roll_width_in"),
+                repeat_in=_dec_field(values, "repeat_in"),
+                match_type=_match_field(values, "match_type"),
+                unit_of_sale=unit,
+                yield_per_unit=_dec_field(values, "yield_per_unit"),
+                source_sheet_id=wc_sheets[wc_tag],
+            )
+        )
+
+    walls_by_room: dict[str, dict[str, Wall]] = {}
+    applications: list[Application] = []
+    for ref_id, values in wall_values.items():
+        room_number, _, wall_designation = ref_id.partition("/")
+        if not room_number or not wall_designation:
+            continue
+        room_id = RoomId(room_number)
+        wall_id = WallId(wall_designation)
+        walls_by_room.setdefault(room_number, {})[wall_designation] = Wall(
+            wall_id=wall_id,
+            room_id=room_id,
+            width_in=_opt_dec(values, "width_in"),
+            applied_height_in=_opt_dec(values, "applied_height_in"),
+        )
+        wall_tag = values.get("wc_tag")
+        if isinstance(wall_tag, str) and wall_tag:
+            applications.append(
+                Application(
+                    application_id=ApplicationId(f"{ref_id}/{wall_tag}"),
+                    wc_tag=wall_tag,
+                    room_id=room_id,
+                    wall_id=wall_id,
+                    origin=ApplicationOrigin.WALL_OVERRIDE,
+                    source_sheet_id=wall_sheets[ref_id],
+                )
+            )
+
+    repository.put_rooms(
+        set_id,
+        [
+            Room(
+                room_id=RoomId(room_number),
+                room_number=room_number,
+                walls=list(walls.values()),
+            )
+            for room_number, walls in walls_by_room.items()
+        ],
+    )
+    repository.put_applications(set_id, applications)
+    repository.put_definitions(set_id, registry.all_definitions())
 
 
 def main() -> int:
@@ -58,6 +199,12 @@ def main() -> int:
     aggregation = AggregationService(
         application_lookup, flags=flags, ledger=ledger
     )
+
+    def commit_entered_values() -> None:
+        """Projection hook for the shell (step 3 of the spec data flow)."""
+        project_entered_values(
+            set_id, ingest, adapter, gate, registry, repository
+        )
 
     def results_provider(current_set: SetId) -> Sequence[QuantityResult]:
         """Recompute every unblocked application's quantity (AC-7.2)."""
@@ -109,7 +256,9 @@ def main() -> int:
         flags,
         gate,
         export_service,
+        on_entry_committed=commit_entered_values,
     )
+    shell.recompute()
     shell.show()
     return app.exec()
 
