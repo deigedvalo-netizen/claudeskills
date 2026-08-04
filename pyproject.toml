@@ -4,6 +4,10 @@
 # once packaged (PyInstaller 6.10.0 per technology_choices produces the
 # distributable; it is a build-time tool, not a runtime dependency).
 #
+# pypdfium2 rasterises PDF drawing sets into sheet images at ingest; it
+# bundles its own PDFium build, so the offline install needs no system
+# libraries (FR-1, NFR-3).
+#
 # The optional 'vision' extra isolates the v1.1 opt-in network client
 # (ADR-004): a default install carries no network client on any code path.
 
@@ -21,6 +25,7 @@ dependencies = [
     "pydantic==2.8.2",
     "Pillow==10.4.0",
     "openpyxl==3.1.5",
+    "pypdfium2==5.7.1",
     "reportlab==4.2.2",
 ]
 
