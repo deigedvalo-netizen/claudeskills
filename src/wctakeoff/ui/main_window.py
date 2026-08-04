@@ -220,6 +220,32 @@ class DesktopShell(QMainWindow):
         self._viewer.show_sheet(sheet)
         self._wc_form.set_current_sheet(sheet_id)
         self._dim_form.set_current_sheet(sheet_id)
+        self._apply_read_scale(sheet_id)
+
+    def _apply_read_scale(self, sheet_id: SheetId) -> None:
+        """Offer the sheet's own printed scale note to the viewer.
+
+        The viewer declines it if the estimator has already calibrated
+        this sheet by hand, so a read scale never displaces a drawn one.
+        """
+        detected = self._ingest.detected_scale_for(sheet_id)
+        if detected is None:
+            self._show_status(
+                "No usable scale note on this sheet — use Set scale and "
+                "click across a printed dimension."
+            )
+            return
+        adopted = self._viewer.adopt_read_scale(
+            detected.inches_per_pixel,
+            detected.pixels_per_paper_inch,
+            detected.real_inches_per_paper_inch,
+            detected.describe(),
+        )
+        if adopted:
+            self._show_status(
+                f"Scale read from this sheet: {detected.describe()} — "
+                "measure now, or use Set scale to override it."
+            )
 
     def _show_status(self, message: str) -> None:
         """Surface viewer guidance and measurement results to the estimator."""
