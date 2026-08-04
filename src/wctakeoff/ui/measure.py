@@ -61,9 +61,19 @@ class Calibration(NamedTuple):
     inches_per_pixel: Decimal
     reference_pixels: Decimal
     reference_inches: Decimal
+    #: Where the scale came from, quoted back so it can be audited. Empty
+    #: means the estimator drew the reference span themselves.
+    source: str = ""
+
+    @property
+    def is_measured(self) -> bool:
+        """Whether an estimator drew this scale rather than it being read."""
+        return not self.source
 
     def describe(self) -> str:
         """Human-readable provenance line for the trace ledger (NFR-1)."""
+        if self.source:
+            return self.source
         return (
             f"{format_inches(self.reference_inches)} measured across "
             f"{self.reference_pixels.quantize(Decimal('0.1'))} px "
@@ -194,6 +204,33 @@ def calibrate(
         inches_per_pixel=MEASURE_CONTEXT.divide(known_length, pixels),
         reference_pixels=pixels,
         reference_inches=known_length,
+    )
+
+
+def calibration_from_scale(
+    inches_per_pixel: Decimal,
+    reference_pixels: Decimal,
+    reference_inches: Decimal,
+    source: str,
+) -> Calibration:
+    """Wrap a scale read off the sheet as a Calibration.
+
+    Used for a scale derived from the drawing's own printed scale note
+    plus the page geometry. `source` names that note, so a measurement
+    made on this scale can always be traced back to the text it came from
+    (NFR-1) and distinguished from one the estimator drew by hand.
+    """
+    if inches_per_pixel <= 0:
+        raise ScaleUncalibratedError(
+            "a scale must be a positive number of inches per pixel"
+        )
+    if not source:
+        raise ValueError("a read scale must name where it was read from")
+    return Calibration(
+        inches_per_pixel=inches_per_pixel,
+        reference_pixels=reference_pixels,
+        reference_inches=reference_inches,
+        source=source,
     )
 
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import io
 import re
+from decimal import Decimal
 from pathlib import Path
 from types import ModuleType
 from typing import Sequence
@@ -35,6 +36,7 @@ from wctakeoff.domain.models import (
 )
 from wctakeoff.domain.units import FlagKind, SheetRole
 from wctakeoff.ingest.roles import infer_role
+from wctakeoff.ingest.scale import DetectedScale, detect_page_scale
 from wctakeoff.review.flags import FlagRegistry
 
 _THUMBNAIL_SIZE = (256, 256)
@@ -75,6 +77,7 @@ class SheetIngestService:
     def __init__(self, flags: FlagRegistry | None = None) -> None:
         self._flags = flags
         self._sheets: dict[SheetId, Sheet] = {}
+        self._detected_scales: dict[SheetId, DetectedScale] = {}
 
     def ingest_sheets(
         self, paths: Sequence[Path], set_id: SetId
@@ -217,27 +220,64 @@ class SheetIngestService:
         accepted: list[Sheet],
         unlabelled: list[SheetId],
     ) -> None:
-        """Rasterise one PDF page and register it as a sheet."""
+        """Rasterise one PDF page, register it, and read its scale note."""
         page = document[index]  # type: ignore[index]
         destination = self._render_path(source, index)
+        page_text = self._page_text(page)
 
         if destination.exists():
             with Image.open(destination) as cached:
                 cached.load()
                 thumbnail = self._thumbnail(cached)
+                rendered_width = cached.width
         else:
             scale = PDF_RENDER_DPI / _PDF_POINTS_PER_INCH
             image = page.render(scale=scale).to_pil()
             try:
                 image.save(destination, format="PNG")
                 thumbnail = self._thumbnail(image)
+                rendered_width = image.width
             finally:
                 image.close()
 
-        sheet_number = self._page_sheet_number(page, source, index)
-        self._register(
+        sheet_number = self._page_sheet_number(page_text, source, index)
+        sheet = self._register(
             destination, sheet_number, thumbnail, accepted, unlabelled
         )
+
+        detected = self._detect_scale(page, page_text, rendered_width)
+        if detected is not None:
+            self._detected_scales[sheet.sheet_id] = detected
+
+    @staticmethod
+    def _detect_scale(
+        page: object, page_text: str, rendered_width: int
+    ) -> DetectedScale | None:
+        """Read the page's printed scale note against its true geometry.
+
+        Returns None whenever the page does not state exactly one usable
+        scale; the estimator then calibrates by hand rather than measuring
+        against an assumed conversion (ADR-005).
+        """
+        try:
+            width_points, _height = page.get_size()  # type: ignore[attr-defined]
+        except Exception:
+            return None
+        try:
+            page_width = Decimal(str(width_points))
+        except Exception:
+            return None
+        return detect_page_scale(
+            page_text, page_width, Decimal(rendered_width)
+        )
+
+    def detected_scale_for(self, sheet_id: SheetId) -> DetectedScale | None:
+        """The scale read off this sheet's own title block, if any.
+
+        Advisory only: it pre-fills the viewer, and an estimator's manual
+        calibration always overrides it (ARCH-A2, ADR-011).
+        """
+        return self._detected_scales.get(sheet_id)
 
     # -- helpers ----------------------------------------------------------
 
@@ -257,7 +297,21 @@ class SheetIngestService:
         return render_cache_dir() / name
 
     @staticmethod
-    def _page_sheet_number(page: object, source: Path, index: int) -> str:
+    def _page_text(page: object) -> str:
+        """All extractable text on a page; empty for a scanned image page."""
+        try:
+            textpage = page.get_textpage()  # type: ignore[attr-defined]
+            try:
+                return textpage.get_text_range() or ""
+            finally:
+                close = getattr(textpage, "close", None)
+                if callable(close):
+                    close()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _page_sheet_number(text: str, source: Path, index: int) -> str:
         """Best-effort sheet number for a PDF page.
 
         Falls back to a positional label when the page carries no
@@ -266,17 +320,6 @@ class SheetIngestService:
         than being given a guessed one (ADR-005).
         """
         fallback = f"{source.stem}-p{index + 1}"
-        try:
-            textpage = page.get_textpage()  # type: ignore[attr-defined]
-            try:
-                text = textpage.get_text_range()
-            finally:
-                close = getattr(textpage, "close", None)
-                if callable(close):
-                    close()
-        except Exception:
-            return fallback
-
         matches = re.findall(r"\b[A-Z]{1,2}-?\d{2,3}(?:\.\d+)?\b", text or "")
         if not matches:
             return fallback
@@ -291,7 +334,7 @@ class SheetIngestService:
         thumbnail: bytes,
         accepted: list[Sheet],
         unlabelled: list[SheetId],
-    ) -> None:
+    ) -> Sheet:
         """Record an accepted sheet and flag it when its role is unclear."""
         role = infer_role(sheet_number)
         sheet = Sheet(
@@ -322,6 +365,7 @@ class SheetIngestService:
                         ),
                     )
                 )
+        return sheet
 
     def assign_sheet_role(self, sheet_id: SheetId, role: SheetRole) -> Sheet:
         """assign_sheet_role(sheet_id, role) -> Sheet

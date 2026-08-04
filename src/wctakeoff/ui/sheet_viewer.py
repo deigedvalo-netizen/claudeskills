@@ -17,6 +17,7 @@ instead of assuming a scale (ADR-005). Contains no takeoff arithmetic.
 from __future__ import annotations
 
 import enum
+from decimal import Decimal
 from typing import Final
 
 from PySide6.QtCore import QPointF, Qt, Signal
@@ -44,6 +45,7 @@ from wctakeoff.ui.measure import (
     Point,
     ScaleUncalibratedError,
     calibrate,
+    calibration_from_scale,
     format_area_sf,
     format_inches,
     from_float,
@@ -107,6 +109,39 @@ class SheetViewer(QGraphicsView):
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
         self.status.emit(self._prompt())
+
+    def adopt_read_scale(
+        self,
+        inches_per_pixel: Decimal,
+        reference_pixels: Decimal,
+        reference_inches: Decimal,
+        source: str,
+    ) -> bool:
+        """Pre-fill this sheet's scale from its own printed scale note.
+
+        Refuses to overwrite a scale the estimator drew by hand: a
+        measured calibration is their explicit judgement about this sheet
+        and always wins over a read one (ARCH-A2, ADR-011). Returns
+        whether the read scale was adopted.
+        """
+        if self._sheet_id is None:
+            return False
+        existing = self._calibrations.get(self._sheet_id)
+        if existing is not None and existing.is_measured:
+            return False
+        try:
+            scale = calibration_from_scale(
+                inches_per_pixel,
+                reference_pixels,
+                reference_inches,
+                source,
+            )
+        except (ScaleUncalibratedError, ValueError):
+            return False
+        self._calibrations[self._sheet_id] = scale
+        self.calibrated.emit(scale.describe())
+        self.status.emit(self._prompt())
+        return True
 
     def calibration(self) -> Calibration | None:
         """The displayed sheet's scale, if one has been established."""
